@@ -1318,11 +1318,19 @@ impl Jbd2Writer {
         while item_idx < txn.body_items.len() {
             match &txn.body_items[item_idx] {
                 Jbd2TxnBodyItem::Write(..) => {
-                    let mut chunk: Vec<(BlockNumber, &[u8], Vec<u8>)> = Vec::new();
+                    let mut chunk: Vec<(BlockNumber, bool, Vec<u8>)> = Vec::new();
                     while item_idx < txn.body_items.len() && chunk.len() < tags_per_desc {
                         match &txn.body_items[item_idx] {
                             Jbd2TxnBodyItem::Write(target, payload) => {
                                 let copy_len = payload.len().min(bs);
+                                // The JBD2 escape rule and the in-place magic
+                                // zeroing both key on the SAME test — the original
+                                // payload's first four bytes equal JBD2_MAGIC.
+                                // Compute it once here (the descriptor tag loop
+                                // below reuses it) instead of re-comparing the
+                                // bytes a second time per block.
+                                let escaped =
+                                    payload.len() >= 4 && payload[0..4] == JBD2_MAGIC.to_be_bytes();
                                 // A full-block payload overwrites every byte, so
                                 // the zero-init would be pure waste — copy it
                                 // directly. Only short payloads need the block
@@ -1335,12 +1343,11 @@ impl Jbd2Writer {
                                     p
                                 };
 
-                                let magic_be = JBD2_MAGIC.to_be_bytes();
-                                if padded.len() >= 4 && padded[0..4] == magic_be {
+                                if escaped {
                                     padded[0..4].copy_from_slice(&[0u8; 4]);
                                 }
 
-                                chunk.push((*target, payload.as_slice(), padded));
+                                chunk.push((*target, escaped, padded));
                                 item_idx += 1;
                             }
                             Jbd2TxnBodyItem::Revoke(_) => break,
@@ -1351,7 +1358,7 @@ impl Jbd2Writer {
                     encode_jbd2_header(&mut desc, JBD2_BLOCKTYPE_DESCRIPTOR, seq);
 
                     let mut off = JBD2_HEADER_SIZE;
-                    for (i, (target, payload, padded)) in chunk.iter().enumerate() {
+                    for (i, (target, escaped, padded)) in chunk.iter().enumerate() {
                         let is_last_in_desc = i == chunk.len() - 1;
                         let mut flags = if is_last_in_desc {
                             JBD2_TAG_FLAG_LAST
@@ -1359,8 +1366,7 @@ impl Jbd2Writer {
                             0
                         };
 
-                        let magic_be = JBD2_MAGIC.to_be_bytes();
-                        if payload.len() >= 4 && payload[0..4] == magic_be {
+                        if *escaped {
                             flags |= JBD2_TAG_FLAG_ESCAPE;
                         }
 
