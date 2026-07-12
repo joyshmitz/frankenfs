@@ -5966,3 +5966,27 @@ Why this is NOT a clean micro-lever:
 
 prepare_inode's `vec![0;60]` extent-bytes buffer is already the measured-optimal
 form (bd-cc-prepare-inode-inline REFUTED). No production code changed.
+
+### 2026-07-12 (cont.) — ffs-block I/O engine + cache read path: dead-code / floor bounds
+
+Examined two previously-unread hot-looking spots in ffs-block:
+
+- `io_engine.rs` `PreadPwriteEngine::submit_batch` does TWO `self.stats.lock()`
+  per read op (`record_read_submission` before the pread, `record_bytes_read`
+  after) — a real double-lock that LOOKS like a lock-contention lever. But
+  `submit_batch` / `IoEngine` has NO production caller: FileByteDevice reads via
+  `self.file.read_exact_at` (pread) directly and never routes through the engine.
+  The engine is a test-only / not-yet-wired scaffold. Do NOT optimize its
+  stats-locking — it is dead on every production path; any "win" is unmeasurable.
+  (If io_uring/registered-buffer support is ever wired in, revisit the stats as
+  atomics THEN, gated behind the `unsafe-io` design bead noted earlier.)
+- The production cache read path (`ShardedArcCache` / `DeferredArcCache`
+  read_block) is the profiled `ShardedCache floor` (arc_swap hot slots); the flush
+  path (`flush_blocks`) is per-block `write_block` I/O + peer MVCC pin/persist
+  (ffs-mvcc). Neither carries a non-peer CPU micro-lever.
+
+Net for this multi-turn micro sweep: every non-peer lane has now been examined at
+source level; the clean measurable veins are mined and the remaining candidates
+are peer (MVCC block copy / ffs-alloc), structural (create-path block-read fusion,
+GDT write-elision needing a per-group dirty flag), or dead/test-only. No
+production code changed.
