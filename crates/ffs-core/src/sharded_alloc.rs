@@ -124,6 +124,18 @@ impl PerGroupAlloc {
         FreeTotals { blocks, inodes }
     }
 
+    /// Clone every group's `GroupStats`, one group-lock at a time — the full
+    /// authoritative per-group state (free counts, UNINIT flags, itable_unused,
+    /// bitmap locators) the deferred-GDT flush needs. After sharded creates the
+    /// single-lock `Ext4AllocState.groups` array is STALE (the sharded path debits
+    /// these records + the on-disk GDs, never that array), so the durability-boundary
+    /// `ext4_flush_group_descriptors` must source the descriptors from HERE or it
+    /// writes stale (still-UNINIT, still-full) descriptors → e2fsck-dirty. Exact at a
+    /// quiesced flush boundary (same semantics as [`Self::total_free`]).
+    pub(crate) fn snapshot_group_stats(&self) -> Vec<GroupStats> {
+        self.groups.iter().map(|g| g.stats.lock().clone()).collect()
+    }
+
     /// Per-group free counts, snapshotted one group-lock at a time — the input a
     /// sharded Orlov directory allocator needs (`orlov_choose_group_for_dir` reads
     /// each group's `free_inodes`/`free_blocks`/`used_dirs` plus the fs-wide

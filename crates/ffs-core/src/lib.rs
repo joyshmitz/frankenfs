@@ -17602,6 +17602,30 @@ impl OpenFs {
         let Ok(alloc_mutex) = self.require_alloc_state() else {
             return Ok(());
         };
+        // bd-bhh0i: when the sharded create path is active, the single-lock
+        // `alloc.groups` is STALE (sharded creates debit the sharded records + the
+        // on-disk GDs, not this array), so flushing the descriptors from it would
+        // re-write stale (still-UNINIT, still-full) group descriptors and clobber the
+        // sharded-updated on-disk GDs → e2fsck-dirty. Source the descriptors from a
+        // snapshot of the sharded records instead (geo + pctx derived lock-free).
+        #[cfg(feature = "bhh0i_sharded_alloc")]
+        if self.bhh0i_sharded_ops_active() {
+            let sharded = self
+                .ext4_sharded_alloc
+                .as_ref()
+                .expect("sharded active implies present");
+            let sb = self.ext4_superblock().ok_or_else(|| {
+                FfsError::Format("sharded GDT flush: not an ext4 filesystem".into())
+            })?;
+            let synthetic = Ext4AllocState {
+                geo: FsGeometry::from_superblock(sb),
+                groups: sharded.snapshot_group_stats(),
+                persist_ctx: self.ext4_persist_ctx_lockfree().ok_or_else(|| {
+                    FfsError::Format("sharded GDT flush: persist ctx unavailable".into())
+                })?,
+            };
+            return self.ext4_persist_group_descriptors_from(cx, &synthetic);
+        }
         let alloc = alloc_mutex.read();
         self.ext4_persist_group_descriptors_from(cx, &alloc)
     }
@@ -62858,6 +62882,60 @@ mod tests {
             u64::from(on_disk_free_inodes),
             sharded_free_inodes,
             "synced superblock free-inode count must fold from the sharded total_free"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn flush_group_descriptors_from_sharded_persists_debited_counts_bd_bhh0i() {
+        // e2fsck-critical (per-group): the deferred-GDT flush must source group
+        // descriptors from the SHARDED records, not the stale single-lock groups. So
+        // after sharded creates + flush, the summed on-disk GD free-inode count must
+        // equal the sharded total (debited). Without the fix the flush would write
+        // the stale FULL counts (the single-lock array is untouched by sharded
+        // creates) → this sum would exceed the sharded total → e2fsck free-count wrong.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        fs.set_bhh0i_sharded_ops(true);
+
+        let mut scope = RequestScope::empty();
+        for i in 0..5u32 {
+            let name = format!("g{i}");
+            fs.ext4_create(&cx, &mut scope, root, name.as_bytes(), 0o644, 0, 0)
+                .expect("routed sharded create");
+        }
+        let sharded_free_inodes = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+
+        fs.ext4_flush_group_descriptors(&cx)
+            .expect("deferred-GDT flush");
+
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = fs.ext4_persist_ctx_lockfree().expect("persist ctx");
+        let dev = fs.direct_block_device_adapter();
+        let gdt = dev
+            .read_block(&cx, pctx.gdt_block)
+            .expect("read GDT block")
+            .into_inner();
+        let ds = usize::from(pctx.desc_size);
+        let mut sum = 0_u64;
+        for g in 0..geo.group_count as usize {
+            let off = g * ds;
+            let gd = ffs_ondisk::ext4::Ext4GroupDesc::parse_from_bytes(&gdt[off..], pctx.desc_size)
+                .expect("parse group descriptor");
+            sum += u64::from(gd.free_inodes_count);
+        }
+        assert_eq!(
+            sum, sharded_free_inodes,
+            "on-disk GD free-inode sum must equal the sharded total after flush"
         );
     }
 
