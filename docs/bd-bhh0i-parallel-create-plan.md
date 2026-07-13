@@ -953,20 +953,28 @@ supplies it.
    frees a 3-block run, total_free restored. bd_bhh0i 16/16. **The DirAllocBackend
    seam is now COMPLETE: dir_geo / dir_alloc_blocks / dir_write_inode /
    dir_insert_extent / dir_truncate_extents.**
-   **4c NEXT: convert (c) `ext4_rebuild_htree_dir` to `&mut dyn DirAllocBackend`.**
-   Route: geo→backend.dir_geo(); the per-new-block loop's `let Ext4AllocState{geo,
-   groups,persist_ctx}=&mut *alloc` DESTRUCTURE + alloc_blocks_persist +
-   GroupBlockAllocator+insert → dir_alloc_blocks + dir_insert_extent (drop the
-   destructure); the `truncate_extents(...m_blocks...)` → dir_truncate_extents;
-   write_inode→dir_write_inode. Its TWO callers (both in ext4_add_dir_entry @ the
-   NeedsGrowthHtree fallthrough + the linear→htree convert path) each wrap `alloc` in
-   SingleLockDirAlloc (both are `return` sites → move/reborrow OK). Gotcha: (c) uses
-   `&AllocHint::default()` for its block allocs (not a numa hint) — dir_alloc_blocks
-   takes the hint, so pass `&AllocHint::default()`. Gate `... htree` (rebuild path is
-   exercised by many_creates_in_htree_dir_trigger_rebuild + fresh_linear_dir_auto_
-   converts_to_htree). THEN 4d: linear-grow
-   in (d) `ext4_add_dir_entry` — d builds ONE SingleLockDirAlloc, passes to a/c and
-   uses for its own linear alloc/insert/write. Gate each `... htree` (byte-identical
+   ✅ 4c DONE (`6629ef43`): (c) `ext4_rebuild_htree_dir` — dropped BOTH
+   `Ext4AllocState` destructures (loop-alloc + truncate) → dir_alloc_blocks +
+   dir_insert_extent + dir_truncate_extents; geo/write_inode routed. Both callers
+   (NeedsGrowthHtree fallthrough + linear→htree convert, both return sites) wrap
+   `alloc` in SingleLockDirAlloc. htree gate green (many_creates_..._rebuild +
+   fresh_linear_dir_auto_converts both explicitly pass). **3 of 4 helpers threaded.**
+   **4d NEXT: (d) `ext4_add_dir_entry` — the DISPATCHER (calls a + c, and has its OWN
+   linear-grow append).** Two-part slice: (1) find d's own linear-grow alloc/insert/
+   write (the `DirInsertOutcome::NeedsGrowthLinear`/append-a-linear-block path after
+   the match — grep for alloc_blocks_persist / GroupBlockAllocator / write_inode
+   inside d) and route it through a backend the same way; (2) convert d's SIGNATURE to
+   `&mut dyn DirAllocBackend`, build the SingleLock backend ONCE at the top, and
+   REMOVE the per-call SingleLockDirAlloc wraps added in 4a/4b/4c (pass d's own
+   backend straight to a/c) — mirrors how (a) forwarded its backend to (b) in 4b. d's
+   MANY callers (ext4_create/mkdir/link/symlink/mknod/rename) then each wrap `alloc`
+   in SingleLockDirAlloc (byte-id) — OR, this IS where step-5 diverges: the sharded
+   create path passes a ShardedDirAlloc. So 4d + step-5 (the atomic cutover) may
+   MERGE at d's callers. Consider: convert d's body first (linear-grow + consolidate
+   a/c wraps) keeping the `alloc` param, THEN a final slice flips d's signature +
+   wires all callers (single-lock wrap) + the sharded create path together.
+   Gate d's body conversion with `... create` / `... mkdir` / `... rename` +
+   `... htree` (linear + htree + rebuild all exercised). Gate each `... htree` (byte-identical
    single-lock → NO e2fsck yet). GOTCHA (confirmed 4a/4b): snapshot `let geo =
    backend.dir_geo();` at the top and route ALL `alloc.geo` reads (block_size,
    sectors_per_block, `numa_allocation_hint(&geo)`) through it — owned POD clone,
