@@ -17367,6 +17367,32 @@ impl OpenFs {
         (dur.as_secs(), dur.subsec_nanos())
     }
 
+    /// Reconstruct the immutable [`PersistCtx`] WITHOUT holding the alloc write
+    /// lock — the lock-free input the sharded parallel-create path needs
+    /// (bd-bhh0i cutover, first wiring slice). Every field is derived from the
+    /// immutable superblock + geometry exactly as `enable_writes` builds
+    /// `alloc_state.persist_ctx` at construction (see the `PersistCtx { .. }`
+    /// literal ~lib.rs:6843), so the result is byte-identical to the locked
+    /// copy — asserted by `ext4_persist_ctx_lockfree_matches_locked_bd_bhh0i`.
+    /// Safe lock-free because every `PersistCtx` field is fixed at mkfs and
+    /// never mutated after mount.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_persist_ctx_lockfree(&self) -> Option<PersistCtx> {
+        let sb = self.ext4_superblock()?;
+        let geom = self.ext4_geometry.as_ref()?;
+        let geo = FsGeometry::from_superblock(sb);
+        Some(PersistCtx {
+            gdt_block: BlockNumber(u64::from(sb.first_data_block) + 1),
+            desc_size: geom.group_desc_size,
+            has_metadata_csum: geom.has_metadata_csum,
+            csum_seed: geom.csum_seed,
+            uuid: geom.uuid,
+            group_desc_checksum_kind: geom.group_desc_checksum_kind,
+            blocks_per_group: Self::block_bitmap_units_per_group(&geo),
+            inodes_per_group: sb.inodes_per_group,
+        })
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61479,6 +61505,38 @@ mod tests {
         // The whole point: rmdir now succeeds on the drained directory.
         fs.rmdir(&cx, root, OsStr::new("drain_d"))
             .expect("rmdir drained");
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_persist_ctx_lockfree_matches_locked_bd_bhh0i() {
+        // The sharded parallel-create path reads PersistCtx WITHOUT the alloc
+        // write lock; it must equal the copy behind the lock (every field is
+        // immutable + superblock-derived). This pins that invariant.
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let locked = fs
+            .ext4_alloc_state
+            .as_ref()
+            .expect("alloc state present after enable_writes")
+            .read()
+            .persist_ctx
+            .clone();
+        let lf = fs
+            .ext4_persist_ctx_lockfree()
+            .expect("lock-free persist ctx");
+        assert_eq!(lf.gdt_block, locked.gdt_block);
+        assert_eq!(lf.desc_size, locked.desc_size);
+        assert_eq!(lf.has_metadata_csum, locked.has_metadata_csum);
+        assert_eq!(lf.csum_seed, locked.csum_seed);
+        assert_eq!(lf.uuid, locked.uuid);
+        assert_eq!(
+            format!("{:?}", lf.group_desc_checksum_kind),
+            format!("{:?}", locked.group_desc_checksum_kind)
+        );
+        assert_eq!(lf.blocks_per_group, locked.blocks_per_group);
+        assert_eq!(lf.inodes_per_group, locked.inodes_per_group);
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
