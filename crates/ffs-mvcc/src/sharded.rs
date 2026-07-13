@@ -437,6 +437,12 @@ pub struct ShardedMvccStore {
     /// (enforced by `lock_shards`).
     shards: Vec<RwLock<MvccShard>>,
     shard_count: usize,
+    // NOTE: `shard_mask` shares a cache line with the per-commit-written
+    // next_txn/next_commit/publication_gate (report_hot_field_cache_line_layout),
+    // but cache-line-isolating it is measurably NEUTRAL — a plain (non-atomic)
+    // read-hot field is register-hoisted out of hot loops, so it is not re-read
+    // from the invalidated line. False sharing only hurts ATOMIC reads. See the
+    // 2026-07-13 negative-ledger row.
     shard_mask: u64,
     next_txn: AtomicU64,
     next_commit: AtomicU64,
@@ -1500,6 +1506,50 @@ mod tests {
 
     fn make_store(shards: usize) -> ShardedMvccStore {
         ShardedMvccStore::new(shards)
+    }
+
+    #[test]
+    fn report_hot_field_cache_line_layout() {
+        use std::mem::{offset_of, size_of};
+        let nt = offset_of!(ShardedMvccStore, next_txn);
+        let nc = offset_of!(ShardedMvccStore, next_commit);
+        let sm = offset_of!(ShardedMvccStore, shard_mask);
+        let sc = offset_of!(ShardedMvccStore, shard_count);
+        let av = offset_of!(ShardedMvccStore, any_version_installed);
+        let pg = offset_of!(ShardedMvccStore, publication_gate);
+        let asn = offset_of!(ShardedMvccStore, active_snapshots);
+        // Read-hot: shard_mask/shard_count (every shard_index), any_version_installed
+        // (every read). Write-hot: next_txn/next_commit (every commit).
+        eprintln!(
+            "FIELDLAYOUT size={} next_txn={nt} next_commit={nc} shard_mask={sm} \
+             shard_count={sc} any_version_installed={av} publication_gate={pg} \
+             active_snapshots={asn}",
+            size_of::<ShardedMvccStore>()
+        );
+        eprintln!(
+            "FIELDLAYOUT line64: shard_mask={} next_commit={} next_txn={} \
+             any_version_installed={} publication_gate={}",
+            sm / 64,
+            nc / 64,
+            nt / 64,
+            av / 64,
+            pg / 64
+        );
+        eprintln!(
+            "FIELDLAYOUT collide shard_mask/next_commit={} shard_count/next_commit={} \
+             any_version_installed/next_commit={} any_version_installed/publication_gate={}",
+            sm / 64 == nc / 64,
+            sc / 64 == nc / 64,
+            av / 64 == nc / 64,
+            av / 64 == pg / 64
+        );
+        let _ = (sc, asn, nt, pg);
+        // Diagnostic only: `shard_mask` DOES share a cache line with next_commit
+        // here, but cache-line-isolating it measured NEUTRAL (a plain read-hot
+        // field is register-hoisted, so it is not re-read from the invalidated
+        // line) — see the 2026-07-13 negative-ledger row. Left as documentation of
+        // the layout; no isolation is enforced.
+        assert_eq!(sm / 64, nc / 64);
     }
 
     #[test]

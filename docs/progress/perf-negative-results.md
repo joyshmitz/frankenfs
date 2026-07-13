@@ -13,6 +13,37 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc` cache-line-isolate the read-hot shard_mask - 2026-07-13 (REJECT)
+
+Status: REJECT / MEASURED NEUTRAL (refines the false-sharing lever class).
+
+`report_hot_field_cache_line_layout` confirmed the IMMUTABLE `shard_mask` (read on
+every `shard_index` — per block, every commit AND read) shares a 64-byte cache line
+with `next_txn`/`next_commit`/`publication_gate`, all written every commit — so in
+theory each commit invalidates `shard_mask` for concurrent readers. Wrapped it in
+`#[repr(align(64))]` to give it its own line (byte-identical; layout test confirmed
+isolation). But the A/B (`benches/shard_mask_false_sharing`, adjacent-same-line vs
+isolated-own-line, committers `fetch_add` a counter + readers `x & mask`, N threads):
+
+| committers | adjacent (same line) | isolated (own line) | delta    |
+|------------|----------------------|---------------------|----------|
+| 1          | 10.945 ms            | 11.102 ms           | neutral  |
+| 2          | 31.845 ms            | 31.955 ms           | neutral  |
+| 4          | 70.815 ms            | 71.460 ms           | neutral  |
+
+NEUTRAL at every thread count (CIs fully overlap). Why: `shard_mask` is a PLAIN
+(non-atomic) field. The compiler register-HOISTS a plain read-hot field out of hot
+loops (it is loop-invariant behind a shared `&self`), so it is NOT re-read from the
+invalidated cache line — the coherence invalidation costs nothing. Reverted (the
+align wrapper added 56 B/store + a newtype for zero benefit).
+
+KEY REFINEMENT of the false-sharing lever class (1382b032 any_version_installed WON
+at 1.5-2.1x): false sharing only hurts ATOMIC reads (`load(...)` MUST re-fetch from
+memory every access, so an invalidated line = a real miss). PLAIN reads are hoisted
+and immune. So: cache-line-isolate a hot field ONLY if it is read via an ATOMIC load
+on the hot path; a plain immutable field sharing a line with hot writers is a
+non-issue. Retry predicate: none for plain fields; for atomics, isolate + bench.
+
 ## `mvcc-commit` guard the monotonic any_version_installed store - 2026-07-13 (KEEP, 1382b032)
 
 Status: KEEP / BYTE-IDENTICAL / MEASURED (false-sharing mechanism).

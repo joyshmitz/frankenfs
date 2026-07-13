@@ -100,3 +100,7 @@ harness = false
 [[bench]]
 name = "any_version_flag_false_sharing"
 harness = false
+
+[[bench]]
+name = "shard_mask_false_sharing"
+harness = false
