@@ -96,6 +96,44 @@ fn old_checked_search(
     Some(trusted_validated_search(extents, target, upper_bound))
 }
 
+fn visit_range_linear(extents: &[Ext4Extent], start: u64, end: u64) -> (usize, u64) {
+    let mut count = 0;
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for extent in extents {
+        let extent_start = u64::from(extent.logical_block);
+        let extent_end = extent_start + u64::from(actual_len(extent.raw_len));
+        if extent_end <= start {
+            continue;
+        }
+        if extent_start >= end {
+            break;
+        }
+        count += 1;
+        digest = digest
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(extent.physical_start);
+    }
+    (count, digest)
+}
+
+fn visit_range_partitioned(extents: &[Ext4Extent], start: u64, end: u64) -> (usize, u64) {
+    let first = extents.partition_point(|extent| {
+        u64::from(extent.logical_block) + u64::from(actual_len(extent.raw_len)) <= start
+    });
+    let mut count = 0;
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for extent in &extents[first..] {
+        if u64::from(extent.logical_block) >= end {
+            break;
+        }
+        count += 1;
+        digest = digest
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(extent.physical_start);
+    }
+    (count, digest)
+}
+
 fn bench_leaf_search_validation(c: &mut Criterion) {
     let extents = build_full_leaf();
     let probes = build_probes();
@@ -143,5 +181,61 @@ fn bench_leaf_search_validation(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(extent_leaf_search, bench_leaf_search_validation);
+fn bench_leaf_range_prefix(c: &mut Criterion) {
+    let extents = build_full_leaf();
+    let start = u64::from(LEAF_ENTRIES_4K * 2 * 9 / 10);
+    let end = start + 8;
+
+    for &(range_start, range_end) in &[
+        (0, 1),
+        (1, 2),
+        (start, end),
+        (
+            u64::from(LEAF_ENTRIES_4K * 2),
+            u64::from(LEAF_ENTRIES_4K * 2) + 8,
+        ),
+    ] {
+        assert_eq!(
+            visit_range_linear(&extents, range_start, range_end),
+            visit_range_partitioned(&extents, range_start, range_end),
+            "leaf range selection diverged for [{range_start}, {range_end})"
+        );
+    }
+
+    let mut group = c.benchmark_group("extent_leaf_range_prefix_ab");
+    group.bench_function("linear_prefix_a", |b| {
+        b.iter(|| {
+            black_box(visit_range_linear(
+                black_box(&extents),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("linear_prefix_b", |b| {
+        b.iter(|| {
+            black_box(visit_range_linear(
+                black_box(&extents),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("partitioned_prefix", |b| {
+        b.iter(|| {
+            black_box(visit_range_partitioned(
+                black_box(&extents),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    extent_leaf_search,
+    bench_leaf_search_validation,
+    bench_leaf_range_prefix
+);
 criterion_main!(extent_leaf_search);

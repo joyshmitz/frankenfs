@@ -524,12 +524,14 @@ fn visit_leaf_range<F>(
 where
     F: FnMut(&Ext4Extent) -> Result<()>,
 {
+    // `parse_leaf_entries` guarantees positive-length, sorted,
+    // non-overlapping extents. Their logical ends are therefore monotonic, so
+    // find the first extent that can overlap the requested range instead of
+    // linearly rejecting the leaf's entire preceding prefix.
+    let first = extents.partition_point(|ext| extent_logical_range(ext).1 <= start);
     let mut count = 0;
-    for ext in extents {
-        let (ext_start, ext_end) = extent_logical_range(ext);
-        if ext_end <= start {
-            continue;
-        }
+    for ext in &extents[first..] {
+        let (ext_start, _) = extent_logical_range(ext);
         if ext_start >= end {
             break;
         }
@@ -2094,6 +2096,52 @@ mod tests {
         assert!(checked_logical_range_end("t", 1, 1 << 32).is_err());
         // u64 overflow of start + count is rejected.
         assert!(checked_logical_range_end("t", 1, u64::MAX).is_err());
+    }
+
+    #[test]
+    fn visit_leaf_range_preserves_overlap_order_and_boundaries() {
+        let extents = [
+            Ext4Extent {
+                logical_block: 0,
+                raw_len: 5,
+                physical_start: 100,
+            },
+            Ext4Extent {
+                logical_block: 10,
+                raw_len: 3,
+                physical_start: 200,
+            },
+            Ext4Extent {
+                logical_block: 20,
+                raw_len: 4,
+                physical_start: 300,
+            },
+            Ext4Extent {
+                logical_block: 30,
+                raw_len: 2,
+                physical_start: 400,
+            },
+        ];
+
+        let mut visited = Vec::new();
+        let count = visit_leaf_range(&extents, 5, 31, &mut |extent| {
+            visited.push(extent.logical_block);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(count, 3);
+        assert_eq!(visited, [10, 20, 30]);
+
+        visited.clear();
+        let count = visit_leaf_range(&extents, 3, 21, &mut |extent| {
+            visited.push(extent.logical_block);
+            Ok(())
+        })
+        .unwrap();
+
+        assert_eq!(count, 3);
+        assert_eq!(visited, [0, 10, 20]);
     }
 
     #[test]
