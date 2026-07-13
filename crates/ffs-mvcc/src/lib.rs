@@ -193,30 +193,34 @@ impl MergeProof {
         }
     }
 
+    /// Whether [`Self::merge_bytes`] would succeed for these inputs, WITHOUT
+    /// allocating or building the merged block.
+    ///
+    /// The FCW *preflight* conflict check only needs a yes/no answer. Building
+    /// the merged buffer there (then discarding it and rebuilding it at install
+    /// time) wastes a block-sized allocation + copy per conflicting block on the
+    /// contended commit path, under the shard lock. `merge_valid(..) ==
+    /// merge_bytes(..).is_some()` by construction: both run the identical
+    /// validators; only `merge_bytes` additionally materializes the output.
+    pub(crate) fn merge_valid(&self, base: &[u8], latest: &[u8], staged: &[u8]) -> bool {
+        match self {
+            Self::Unsafe | Self::DisjointBlocks => false,
+            Self::AppendOnly { base_len } => {
+                append_only_merge_valid(*base_len, base, latest, staged)
+            }
+            Self::IndependentKeys { touched_ranges }
+            | Self::NonOverlappingExtents { touched_ranges }
+            | Self::TimestampOnlyInode { touched_ranges } => {
+                merge_non_overlapping_ranges_valid(touched_ranges, base, latest, staged, self)
+            }
+        }
+    }
+
     pub(crate) fn merge_bytes(&self, base: &[u8], latest: &[u8], staged: &[u8]) -> Option<Vec<u8>> {
         match self {
             Self::Unsafe | Self::DisjointBlocks => None,
             Self::AppendOnly { base_len } => {
-                if *base_len > base.len() || *base_len > latest.len() || *base_len > staged.len() {
-                    warn!(
-                        target: "ffs::mvcc::merge",
-                        proof = "AppendOnly",
-                        base_len = *base_len,
-                        actual_base = base.len(),
-                        actual_latest = latest.len(),
-                        actual_staged = staged.len(),
-                        "merge_proof_rejected: base_len exceeds buffer size"
-                    );
-                    return None;
-                }
-                let prefix = &base[..*base_len];
-                if latest[..*base_len] != *prefix || staged[..*base_len] != *prefix {
-                    warn!(
-                        target: "ffs::mvcc::merge",
-                        proof = "AppendOnly",
-                        base_len = *base_len,
-                        "merge_proof_rejected: prefix mismatch (base region was modified)"
-                    );
+                if !append_only_merge_valid(*base_len, base, latest, staged) {
                     return None;
                 }
                 let mut merged = latest.to_vec();
@@ -232,6 +236,35 @@ impl MergeProof {
     }
 }
 
+/// Validate an `AppendOnly` merge (base_len bounds + unchanged common prefix)
+/// without building the merged block. Shared by `merge_valid` (preflight) and
+/// `merge_bytes` (install) so the two can never diverge.
+fn append_only_merge_valid(base_len: usize, base: &[u8], latest: &[u8], staged: &[u8]) -> bool {
+    if base_len > base.len() || base_len > latest.len() || base_len > staged.len() {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof = "AppendOnly",
+            base_len,
+            actual_base = base.len(),
+            actual_latest = latest.len(),
+            actual_staged = staged.len(),
+            "merge_proof_rejected: base_len exceeds buffer size"
+        );
+        return false;
+    }
+    let prefix = &base[..base_len];
+    if latest[..base_len] != *prefix || staged[..base_len] != *prefix {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof = "AppendOnly",
+            base_len,
+            "merge_proof_rejected: prefix mismatch (base region was modified)"
+        );
+        return false;
+    }
+    true
+}
+
 /// Extract the variant name from a `MergeProof` for diagnostic logging.
 fn merge_proof_variant_name(proof: &MergeProof) -> &'static str {
     match proof {
@@ -244,13 +277,18 @@ fn merge_proof_variant_name(proof: &MergeProof) -> &'static str {
     }
 }
 
-fn merge_non_overlapping_ranges(
+/// Validate a range-overlay merge (`IndependentKeys` / `NonOverlappingExtents`
+/// / `TimestampOnlyInode`) WITHOUT building the merged block. Returns `true`
+/// iff [`merge_non_overlapping_ranges`] would return `Some`. Shared by
+/// `merge_valid` (preflight) and `merge_non_overlapping_ranges` (install) so the
+/// yes/no decision can never diverge from the materialized output.
+fn merge_non_overlapping_ranges_valid(
     touched_ranges: &[MergeByteRange],
     base: &[u8],
     latest: &[u8],
     staged: &[u8],
     proof: &MergeProof,
-) -> Option<Vec<u8>> {
+) -> bool {
     let variant = merge_proof_variant_name(proof);
     if latest.len() != base.len() || staged.len() != base.len() {
         warn!(
@@ -261,7 +299,7 @@ fn merge_non_overlapping_ranges(
             staged_len = staged.len(),
             "merge_proof_rejected: buffer length mismatch"
         );
-        return None;
+        return false;
     }
     if !ranges_are_pairwise_disjoint(touched_ranges) {
         warn!(
@@ -270,7 +308,7 @@ fn merge_non_overlapping_ranges(
             range_count = touched_ranges.len(),
             "merge_proof_rejected: touched ranges overlap"
         );
-        return None;
+        return false;
     }
 
     // Every declared range must fit within the block before we slice it.
@@ -284,7 +322,7 @@ fn merge_non_overlapping_ranges(
                 base_len = base.len(),
                 "merge_proof_rejected: range exceeds block size"
             );
-            return None;
+            return false;
         }
     }
 
@@ -308,7 +346,7 @@ fn merge_non_overlapping_ranges(
                 range_count = touched_ranges.len(),
                 "merge_proof_rejected: staged block modified bytes outside declared touched_ranges"
             );
-            return None;
+            return false;
         }
         cursor = range.end();
     }
@@ -319,10 +357,10 @@ fn merge_non_overlapping_ranges(
             range_count = touched_ranges.len(),
             "merge_proof_rejected: staged block modified bytes outside declared touched_ranges"
         );
-        return None;
+        return false;
     }
 
-    let mut merged = latest.to_vec();
+    // True conflict: `latest` must not have modified any declared range vs base.
     for range in touched_ranges {
         if latest[range.start..range.end()] != base[range.start..range.end()] {
             warn!(
@@ -332,8 +370,24 @@ fn merge_non_overlapping_ranges(
                 range_end = range.end(),
                 "merge_proof_rejected: latest version modified the same byte range (true conflict)"
             );
-            return None;
+            return false;
         }
+    }
+    true
+}
+
+fn merge_non_overlapping_ranges(
+    touched_ranges: &[MergeByteRange],
+    base: &[u8],
+    latest: &[u8],
+    staged: &[u8],
+    proof: &MergeProof,
+) -> Option<Vec<u8>> {
+    if !merge_non_overlapping_ranges_valid(touched_ranges, base, latest, staged, proof) {
+        return None;
+    }
+    let mut merged = latest.to_vec();
+    for range in touched_ranges {
         merged[range.start..range.end()].copy_from_slice(&staged[range.start..range.end()]);
     }
     Some(merged)
@@ -2377,6 +2431,53 @@ impl MvccStore {
             })
     }
 
+    /// Preflight validity check mirroring [`Self::resolved_write_bytes_with_policy`]
+    /// but returning only a yes/no answer, WITHOUT building the merged block.
+    /// The FCW preflight discards the merged bytes (it merely gates the commit);
+    /// the install path (`resolved_write_bytes`) rebuilds them. Skipping the
+    /// merged-output allocation here removes one block-sized alloc + copy per
+    /// conflicting block on the contended commit path. Equivalent to
+    /// `resolved_write_bytes_with_policy(..).is_ok()` by construction
+    /// (`merge_valid == merge_bytes(..).is_some()`).
+    fn resolved_write_valid_with_policy(
+        &self,
+        txn: &Transaction,
+        block: BlockNumber,
+        effective: ConflictPolicy,
+    ) -> Result<(), CommitError> {
+        let staged = txn
+            .staged_write(block)
+            .ok_or_else(|| CommitError::DurabilityFailure {
+                detail: format!("write_set keys must have staged bytes: {block:?}"),
+            })?;
+        let observed = self.latest_commit_seq(block);
+        if observed <= txn.snapshot.high {
+            return Ok(());
+        }
+        if effective == ConflictPolicy::Strict {
+            return Err(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed,
+            });
+        }
+
+        let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+        let base = self
+            .version_bytes_at(block, txn.snapshot.high)
+            .unwrap_or_default();
+        let latest = self.version_bytes_at(block, observed).unwrap_or_default();
+        if proof.merge_valid(&base, &latest, staged) {
+            Ok(())
+        } else {
+            Err(CommitError::Conflict {
+                block,
+                snapshot: txn.snapshot.high,
+                observed,
+            })
+        }
+    }
+
     /// Extract the short variant name from a `MergeProof`'s debug representation.
     fn merge_proof_variant_name(proof: &MergeProof) -> String {
         merge_proof_variant_name(proof).to_owned()
@@ -2412,7 +2513,7 @@ impl MvccStore {
         }
 
         if self
-            .resolved_write_bytes_with_policy(txn, block, effective)
+            .resolved_write_valid_with_policy(txn, block, effective)
             .is_ok()
         {
             let bytes_len = txn.staged_write(block).map_or(0, <[u8]>::len);
@@ -5153,6 +5254,43 @@ mod tests {
             merge_non_overlapping_ranges(&[r(8, 4), r(0, 4)], &base, &latest, &trailing, &proof)
                 .is_none()
         );
+    }
+
+    #[test]
+    fn merge_valid_matches_merge_bytes_is_some() {
+        let r = MergeByteRange::new;
+        let base = vec![0_u8; 8];
+        let mut latest = base.clone();
+        latest[4..8].copy_from_slice(&[9, 9, 9, 9]);
+        let mut staged = base.clone();
+        staged[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        let mut staged_sneaky = staged.clone();
+        staged_sneaky[7] = 42; // modified outside declared range
+        let mut latest_conflict = base.clone();
+        latest_conflict[0..4].copy_from_slice(&[5, 5, 5, 5]); // true conflict
+
+        // (proof, base, latest, staged) cases spanning every decision branch.
+        let ap = MergeProof::AppendOnly { base_len: 1 };
+        let ind = MergeProof::independent_key_range(0, 4);
+        let cases: Vec<(MergeProof, &[u8], &[u8], &[u8])> = vec![
+            (MergeProof::Unsafe, &base, &latest, &staged),
+            (MergeProof::DisjointBlocks, &base, &latest, &staged),
+            (ind.clone(), &base, &latest, &staged),           // clean merge
+            (ind.clone(), &base, &latest, &staged_sneaky),    // outside-range reject
+            (ind.clone(), &base, &latest_conflict, &staged),  // true-conflict reject
+            (ind.clone(), &base, &base[..4], &staged),        // size mismatch reject
+            (MergeProof::non_overlapping_extent_range(0, 5), &base, &latest, &staged), // overlaps latest range? no; still valid check
+            (ap.clone(), b"abc", b"abcX", b"abcY"),           // append clean
+            (ap.clone(), b"abc", b"Xbc!", b"abcY"),           // append prefix reject
+            (MergeProof::AppendOnly { base_len: 10 }, b"abc", b"abcX", b"abcY"), // oversized base_len
+        ];
+        for (i, (proof, b, l, s)) in cases.iter().enumerate() {
+            assert_eq!(
+                proof.merge_valid(b, l, s),
+                proof.merge_bytes(b, l, s).is_some(),
+                "case {i}: merge_valid disagrees with merge_bytes().is_some() for {proof:?}"
+            );
+        }
     }
 
     #[test]

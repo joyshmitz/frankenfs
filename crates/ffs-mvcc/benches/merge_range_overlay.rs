@@ -97,6 +97,40 @@ fn merge_new(
     Some(merged)
 }
 
+/// VALIDATE-ONLY: the same checks as `merge_new` but WITHOUT building the merged
+/// block — what the FCW *preflight* now runs (it only needs a yes/no answer; the
+/// merged block is (re)built at install). Faithful copy of `merge_valid`'s range
+/// path. The eliminated `latest.to_vec()` + overlay is the preflight saving.
+fn validate_new(touched: &[MergeByteRange], base: &[u8], latest: &[u8], staged: &[u8]) -> bool {
+    if latest.len() != base.len() || staged.len() != base.len() {
+        return false;
+    }
+    for range in touched {
+        if range.start.saturating_add(range.len) > base.len() {
+            return false;
+        }
+    }
+    let mut ordered: smallvec::SmallVec<[MergeByteRange; 1]> = touched.iter().copied().collect();
+    ordered.sort_unstable_by_key(|range| range.start);
+    let mut cursor = 0usize;
+    for range in &ordered {
+        if staged[cursor..range.start] != base[cursor..range.start] {
+            return false;
+        }
+        cursor = range.start + range.len;
+    }
+    if staged[cursor..] != base[cursor..] {
+        return false;
+    }
+    for range in touched {
+        let end = range.start + range.len;
+        if latest[range.start..end] != base[range.start..end] {
+            return false;
+        }
+    }
+    true
+}
+
 /// Build a merge scenario for a block of `bs` bytes: `staged` modifies one
 /// declared range near the start; `latest` modifies a disjoint range near the
 /// end (a clean, mergeable conflict — the common case).
@@ -146,6 +180,40 @@ fn bench_merge(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // FCW-preflight A/B: the preflight used to run the FULL merge (build the
+    // merged block, then discard it) just to decide "mergeable?"; it now runs
+    // validate-only (no merged-output allocation). Same yes/no answer.
+    let mut pf = c.benchmark_group("mvcc_merge_preflight");
+    for bs in [4096_usize, 16384, 65536] {
+        let (touched, base, latest, staged) = scenario(bs);
+        assert!(validate_new(&touched, &base, &latest, &staged));
+        assert!(merge_new(&touched, &base, &latest, &staged).is_some());
+        pf.bench_with_input(BenchmarkId::new("full_merge_discarded", bs), &bs, |b, _| {
+            b.iter(|| {
+                black_box(
+                    merge_new(
+                        black_box(&touched),
+                        black_box(&base),
+                        black_box(&latest),
+                        black_box(&staged),
+                    )
+                    .is_some(),
+                )
+            });
+        });
+        pf.bench_with_input(BenchmarkId::new("validate_only", bs), &bs, |b, _| {
+            b.iter(|| {
+                black_box(validate_new(
+                    black_box(&touched),
+                    black_box(&base),
+                    black_box(&latest),
+                    black_box(&staged),
+                ))
+            });
+        });
+    }
+    pf.finish();
 }
 
 criterion_group!(merge_range_overlay, bench_merge);

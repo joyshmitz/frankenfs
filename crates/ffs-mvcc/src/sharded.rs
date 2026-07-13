@@ -628,11 +628,20 @@ impl ShardedMvccStore {
             .unwrap_or(CommitSeq(0))
     }
 
-    fn resolved_write_bytes_locked(
+    /// Preflight validity check for a same-block FCW conflict: may the staged
+    /// write commit (no conflict, or a valid merge against the latest version)?
+    /// Returns `Ok(())` to proceed, `Err(Conflict)` to abort.
+    ///
+    /// Unlike the install path (`merged_write_bytes_locked`) this does NOT build
+    /// the merged block — the preflight only needs a yes/no answer, and building
+    /// the merged buffer here (discarded, then rebuilt at install) wastes a
+    /// block-sized allocation + copy per conflicting block under the shard lock.
+    /// `merge_valid == merge_bytes(..).is_some()`, so the gate is unchanged.
+    fn check_write_mergeable_locked(
         txn: &Transaction,
         block: BlockNumber,
         shard: &MvccShard,
-    ) -> Result<Vec<u8>, CommitError> {
+    ) -> Result<(), CommitError> {
         let staged = txn
             .staged_write(block)
             .ok_or_else(|| CommitError::DurabilityFailure {
@@ -640,7 +649,7 @@ impl ShardedMvccStore {
             })?;
         let observed = Self::latest_commit_seq_in_shard(shard, block);
         if observed <= txn.snapshot().high {
-            return Ok(staged.to_vec());
+            return Ok(());
         }
 
         let proof = txn.merge_proof(block).cloned().unwrap_or_default();
@@ -656,13 +665,15 @@ impl ShardedMvccStore {
             .get(&block)
             .and_then(|versions| resolve_version_bytes_cow_at_or_before(versions, observed))
             .unwrap_or_default();
-        proof
-            .merge_bytes(&base, &latest, staged)
-            .ok_or_else(|| CommitError::Conflict {
+        if proof.merge_valid(&base, &latest, staged) {
+            Ok(())
+        } else {
+            Err(CommitError::Conflict {
                 block,
                 snapshot: txn.snapshot().high,
                 observed,
             })
+        }
     }
 
     fn lock_shards(&self, shard_indices: &[usize]) -> ShardGuardVec<'_> {
@@ -710,8 +721,9 @@ impl ShardedMvccStore {
                     });
                 }
 
-                // SafeMerge: attempt merge-proof resolution.
-                if Self::resolved_write_bytes_locked(txn, block, shard).is_ok() {
+                // SafeMerge: attempt merge-proof resolution (validity only; the
+                // merged block is (re)built at install by merged_write_bytes_locked).
+                if Self::check_write_mergeable_locked(txn, block, shard).is_ok() {
                     merge_succeeded = true;
                     debug!(
                         block = block.0,
