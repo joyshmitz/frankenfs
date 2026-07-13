@@ -923,14 +923,23 @@ supplies it.
    alloc_blocks_persist→`dir_alloc_blocks`, the inline insert→`dir_insert_extent`,
    write_inode→`dir_write_inode`. The single-lock caller constructs
    `SingleLockDirAlloc{ alloc: &mut *guard }` and passes it → BYTE-IDENTICAL (same
-   calls, same order). Order (simplest first): (a) `ext4_split_htree_leaf_and_add`
-   (~18994, ONE alloc + ONE insert + ONE write_inode), (b)
-   `ext4_split_htree_dx_node_leaf_and_add` (~19259), (c) `ext4_rebuild_htree_dir`
-   (~19504), (d) linear-grow in `ext4_add_dir_entry` (~18624). Each slice: convert
-   one helper + its single-lock caller, gate create/mkdir/rename + conformance +
-   bd_bhh0i (byte-identical single-lock → NO e2fsck needed yet). GOTCHA: check each
-   helper for OTHER `alloc.geo` reads (sectors_per_block, `numa_allocation_hint(&geo)`)
-   — route them through `backend.dir_geo()` (owned clone; same values).
+   calls, same order). Order is LEAF-FIRST (a helper can't be backend-based while
+   calling an alloc-based callee): call graph is d→{a,c}, a→b, so b and c are leaves.
+   ✅ 4a DONE (`0deb7933`): (b) `ext4_split_htree_dx_node_leaf_and_add` — caller (a)
+   wraps `alloc` in `SingleLockDirAlloc{ alloc: &mut *alloc }` in its MultiLevelIndex
+   return arm. Gated `cargo test -p ffs-core --features bhh0i_sharded_alloc htree`:
+   12 htree unit tests + htree_leaf_split_gate integration = all pass, byte-identical.
+   **4b NEXT**: (c) `ext4_rebuild_htree_dir` (leaf; its TWO callers in
+   `ext4_add_dir_entry` each wrap `alloc` in SingleLockDirAlloc). 4c: (a)
+   `ext4_split_htree_leaf_and_add` — now convertible since (b) is done, so a's b-call
+   passes its `backend` straight through (removes the 4a wrap); a's caller (d) wraps.
+   4d: linear-grow in (d) `ext4_add_dir_entry` — d builds ONE SingleLockDirAlloc at
+   the top, passes it to a/c and uses it for its own linear alloc/insert/write. Each
+   slice: convert one helper + its single-lock caller, gate `... htree` (byte-identical
+   single-lock → NO e2fsck needed yet). GOTCHA (confirmed in 4a): snapshot `let geo =
+   backend.dir_geo();` at the top and route ALL `alloc.geo` reads (block_size,
+   sectors_per_block, `numa_allocation_hint(&geo)`) through it — owned POD clone,
+   identical values, no borrow held across the backend's &mut calls.
 5. Then `ext4_add_dir_entry_sharded`/`ext4_create_sharded` pass `ShardedDirAlloc`;
    the atomic cutover flips ops to the sharded path; LOCAL e2fsck/create-bench gate
    (greenlit) + flip default. THIS is where the 3.7x parallel-create win lands.
