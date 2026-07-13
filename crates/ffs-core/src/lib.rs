@@ -19506,8 +19506,7 @@ impl OpenFs {
         // extent-root key) — one parse per rename instead of one per sub-step
         // (bd-cc-itableloc sibling).
         let extents = self
-            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), parent_inode)?
-            .to_vec();
+            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), parent_inode)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
 
         // The real insert (ext4_add_dir_entry) routes an htree entry to the SINGLE
@@ -19599,7 +19598,7 @@ impl OpenFs {
             // block. For an htree dir, logical block 0 is the dx_root whose
             // index-spanning '..' a linear add_entry would reject as corrupt — skip it.
             let dx_root_phys = Self::ext4_htree_dx_root_phys(parent_inode, &extents);
-            for ext in &extents {
+            for ext in extents.iter() {
                 if ext.is_unwritten() {
                     continue;
                 }
@@ -19798,8 +19797,7 @@ impl OpenFs {
             // re-parsing the parent's whole extent tree per op (bd-cc-itableloc
             // sibling; ~6% of a rename came from this pattern, delbench analog).
             let extents = self
-                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &parent_inode)?
-                .to_vec();
+                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &parent_inode)?;
             let mut removed_ino: Option<u32> = None;
             // The removed parent dir block, persisted only after validation passes.
             let mut pending_dir_write: Option<(BlockNumber, Vec<u8>)> = None;
@@ -19879,7 +19877,7 @@ impl OpenFs {
             }
 
             if removed_ino.is_none() {
-                'outer: for ext in &extents {
+                'outer: for ext in extents.iter() {
                     for block in Self::extent_phys_blocks(ext) {
                         if Some(block) == dx_root_phys {
                             continue;
@@ -22484,8 +22482,7 @@ impl OpenFs {
             // Remove the existing target. Cached extent snapshot (self-invalidating
             // on growth) instead of a fresh full parse (bd-cc-itableloc sibling).
             let extents = self
-                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &new_parent_inode)?
-                .to_vec();
+                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &new_parent_inode)?;
             let reserved_tail = self.ext4_dir_reserved_tail();
             // htree fast path first (O(log N)); linear scan fallback (bd-gauub).
             let removed_existing_via_htree = self
@@ -22501,7 +22498,7 @@ impl OpenFs {
                 .unwrap_or(false);
             if !removed_existing_via_htree {
                 let dx_root_phys = Self::ext4_htree_dx_root_phys(&new_parent_inode, &extents);
-                'rm_existing: for ext in &extents {
+                'rm_existing: for ext in extents.iter() {
                     for block in Self::extent_phys_blocks(ext) {
                         if Some(block) == dx_root_phys {
                             continue;
@@ -22621,8 +22618,7 @@ impl OpenFs {
         // (the snapshot is keyed by extent-root content). Saves the per-rename
         // `parse_extent_leaf` re-parse of the parent's extent tree.
         let src_extents = self
-            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &src_parent_fresh)?
-            .to_vec();
+            .ext4_write_extents_with_scope(cx, &RequestScope::empty(), &src_parent_fresh)?;
         let reserved_tail = self.ext4_dir_reserved_tail();
         // htree fast path: descend the dx index to the hash-target leaf and remove
         // there (O(log N)), keeping rename O(log N) per op for a large directory.
@@ -22640,7 +22636,7 @@ impl OpenFs {
             .unwrap_or(false);
         if !removed_via_htree {
             let dx_root_phys = Self::ext4_htree_dx_root_phys(&src_parent_fresh, &src_extents);
-            'rm_src: for ext in &src_extents {
+            'rm_src: for ext in src_extents.iter() {
                 for block in Self::extent_phys_blocks(ext) {
                     if Some(block) == dx_root_phys {
                         continue;
