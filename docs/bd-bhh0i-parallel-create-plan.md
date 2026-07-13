@@ -910,19 +910,27 @@ supplies it.
    extent-tree-meta allocator the four growth sites need. Tests: trait round-trip
    (2 distinct blocks, hint advances, total_free −2 → free → restored) +
    finalize_node byte-matches a direct keyed stamp; feature suite 15/15.
-3. **NEXT** — extend the `DirAllocBackend` seam with a tree-node INSERT method so a
-   growth helper makes exactly ONE alloc borrow. The borrow snag: each growth helper
-   holds `&mut alloc` for BOTH `alloc_blocks_persist` (→ `dir_alloc_blocks`) AND the
-   `GroupBlockAllocator{ groups: &mut alloc.groups }` inside `ffs_btree::insert` —
-   two `&mut alloc` borrows can't coexist once threaded through a `&mut dyn
-   DirAllocBackend`. Fix: add e.g. `DirAllocBackend::insert_extent(&mut self, cx,
-   dev, root_bytes, extent, ino, generation, hint)` (or a `with_tree_allocator`
-   closure) that runs `ffs_btree::insert` with the backend-appropriate allocator —
-   `SingleLockDirAlloc` builds a `GroupBlockAllocator{ &mut self.alloc.groups }`
-   (BYTE-IDENTICAL to today), `ShardedDirAlloc` builds a `ShardedTreeBlockAllocator{
-   self.fs }`. Additive, both impls, single-lock byte-identical → remote-gatable
-   (compile + create/mkdir/rename + conformance; NO e2fsck yet). THEN slice 4:
-   thread `DirAllocBackend` (with this insert method) through the four growth
-   helpers, single-lock caller passing `SingleLockDirAlloc` → byte-identical;
-   `ext4_add_dir_entry_sharded`/`ext4_create_sharded` pass `ShardedDirAlloc`. THEN
-   the atomic cutover + LOCAL e2fsck/create-bench gate (greenlit) + flip default.
+3. ✅ DONE (`6054ef82`) — `DirAllocBackend::dir_insert_extent` (SingleLock builds the
+   same `GroupBlockAllocator{ &mut self.alloc.groups }` + `ffs_btree::insert` =
+   byte-identical; Sharded builds a `ShardedTreeBlockAllocator`). The seam is now
+   COMPLETE: `dir_geo` / `dir_alloc_blocks` / `dir_write_inode` / `dir_insert_extent`.
+   Dead-code plumbing; gate = compile-under-feature + bd_bhh0i 15/15 unchanged.
+4. **NEXT — thread `DirAllocBackend` through the growth helpers, ONE per slice
+   (byte-identical, remote-gatable — no big-bang).** Each growth helper uses `alloc`
+   ONLY for {geo, alloc_blocks_persist, the `ffs_btree::insert` GroupBlockAllocator,
+   write_inode} — all four now covered by the seam — so a helper can take `&mut dyn
+   DirAllocBackend` instead of `&mut Ext4AllocState`: geo→`backend.dir_geo()`,
+   alloc_blocks_persist→`dir_alloc_blocks`, the inline insert→`dir_insert_extent`,
+   write_inode→`dir_write_inode`. The single-lock caller constructs
+   `SingleLockDirAlloc{ alloc: &mut *guard }` and passes it → BYTE-IDENTICAL (same
+   calls, same order). Order (simplest first): (a) `ext4_split_htree_leaf_and_add`
+   (~18994, ONE alloc + ONE insert + ONE write_inode), (b)
+   `ext4_split_htree_dx_node_leaf_and_add` (~19259), (c) `ext4_rebuild_htree_dir`
+   (~19504), (d) linear-grow in `ext4_add_dir_entry` (~18624). Each slice: convert
+   one helper + its single-lock caller, gate create/mkdir/rename + conformance +
+   bd_bhh0i (byte-identical single-lock → NO e2fsck needed yet). GOTCHA: check each
+   helper for OTHER `alloc.geo` reads (sectors_per_block, `numa_allocation_hint(&geo)`)
+   — route them through `backend.dir_geo()` (owned clone; same values).
+5. Then `ext4_add_dir_entry_sharded`/`ext4_create_sharded` pass `ShardedDirAlloc`;
+   the atomic cutover flips ops to the sharded path; LOCAL e2fsck/create-bench gate
+   (greenlit) + flip default. THIS is where the 3.7x parallel-create win lands.
