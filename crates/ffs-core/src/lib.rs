@@ -18155,6 +18155,123 @@ impl OpenFs {
         Ok(attr)
     }
 
+    /// Sharded (no-write-lock) regular-file create — the bd-bhh0i parallel-create
+    /// CUTOVER path for [`Self::ext4_create`]. Composes the lock-free sharded
+    /// inode-create ([`Self::ext4_sharded_create_inode`] with a Part-B spread
+    /// target), [`inode_to_attr`], and [`Self::ext4_add_dir_entry`] over a
+    /// [`ShardedDirAlloc`] backend — allocating the inode + any parent-dir growth
+    /// entirely through the per-group locks instead of the whole-state
+    /// `ext4_alloc_state.write()` guard, so disjoint-group concurrent creates never
+    /// serialize. On a dir-entry-insert failure the inode is rolled back via
+    /// [`Self::ext4_sharded_free_inode`] (the fresh inode has no data blocks, so a
+    /// bitmap-free is e2fsck-clean). Not yet routed from `ext4_create` — the atomic
+    /// flag flip that routes ALL create ops here is the final cutover slice, gated
+    /// by the local e2fsck + create-bench scaling run.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[allow(clippy::too_many_arguments)]
+    fn ext4_create_sharded(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        name: &[u8],
+        mode: u16,
+        uid: u32,
+        gid: u32,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let dev = self.block_device_adapter();
+        let geo = FsGeometry::from_superblock(sb);
+
+        // Duplicate-name check (POSIX EEXIST), mirroring ext4_create.
+        let htree_dedup_covers = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && Self::htree_create_dedup_enabled();
+        if !htree_dedup_covers && self.lookup_name(cx, parent_inode, name)?.is_some() {
+            return Err(FfsError::Exists);
+        }
+
+        // Part-B spread: distinct concurrent creates start their inode scan in
+        // distinct groups (per-thread seed) so they touch distinct per-group locks
+        // + inode-table blocks; a single-thread seed of 0 keeps parent-group
+        // locality (spread_start_group's contract).
+        let parent_group = GroupNumber(
+            u32::try_from(parent.0.saturating_sub(1) / u64::from(geo.inodes_per_group))
+                .map_err(|_| FfsError::Format("parent inode group index exceeds u32".into()))?,
+        );
+        let target = crate::sharded_alloc::spread_start_group(
+            parent_group,
+            Self::bhh0i_spread_seed(),
+            geo.group_count,
+        );
+
+        let (ino, new_inode) = self.ext4_sharded_create_inode(
+            cx,
+            &dev,
+            mode | 0o100_000, // S_IFREG
+            uid,
+            gid,
+            target,
+            false,
+            tstamp_secs,
+            tstamp_nanos,
+        )?;
+        let attr = inode_to_attr(sb, ino, &new_inode);
+
+        let mut backend = ShardedDirAlloc { fs: self, geo };
+        let add_result = self.ext4_add_dir_entry(
+            cx,
+            &mut backend,
+            parent,
+            parent_inode,
+            name,
+            ino,
+            ffs_ondisk::Ext4FileType::RegFile,
+            csum_seed,
+            tstamp_secs,
+            tstamp_nanos,
+        );
+        drop(backend);
+        if let Err(err) = add_result {
+            // Roll back the sharded inode alloc through the per-group lock. The
+            // fresh inode has no data/xattr blocks, so freeing its bitmap bit +
+            // counts leaves the fs e2fsck-clean (a free inode's table slot is
+            // ignored). Best-effort: surface the original insert error.
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, false);
+            return Err(err);
+        }
+
+        trace!(
+            target: "ffs::write",
+            op = "create_sharded",
+            parent = parent.0,
+            ino = ino.0,
+            name = %String::from_utf8_lossy(name),
+            mode,
+            "file created (sharded)"
+        );
+
+        Ok(attr)
+    }
+
+    /// Per-thread Part-B spread seed for the sharded create path: distinct threads
+    /// hash to distinct seeds, so their concurrent creates start their inode scan
+    /// in distinct groups (distinct per-group locks + inode-table blocks — the
+    /// whole point of the decomposition). Deterministic within a thread; a
+    /// single-thread run yields one seed (near-parent locality).
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bhh0i_spread_seed() -> u32 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::thread::current().id().hash(&mut hasher);
+        hasher.finish() as u32
+    }
+
     /// `mknod(2)` for non-regular file types (char/block device, fifo,
     /// socket). Regular-file creation goes through [`Self::ext4_create`];
     /// directories through [`Self::ext4_mkdir`]; symlinks through
@@ -62365,6 +62482,59 @@ mod tests {
         assert_eq!(
             after_free, total_before,
             "free_data_range must restore total_free to the pre-alloc value"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_create_sharded_creates_findable_file_bd_bhh0i() {
+        // First END-TO-END sharded create: no write guard, inode via the sharded
+        // allocator, dir entry via ShardedDirAlloc. The file must be findable via a
+        // fresh on-disk lookup and be a valid regular inode, and the sharded
+        // allocator must have debited exactly one inode.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let parent_inode = fs.read_inode(&cx, root).expect("read root inode");
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+        let inodes_free_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .inodes;
+
+        fs.ext4_create_sharded(&cx, root, &parent_inode, b"shardedfile", 0o644, 0, 0, csum_seed, 0, 0)
+            .expect("sharded create must succeed");
+
+        // Findable via a fresh on-disk lookup (dir entry + inode both persisted).
+        let root_after = fs.read_inode(&cx, root).expect("re-read root inode");
+        let entry = fs
+            .lookup_name(&cx, &root_after, b"shardedfile")
+            .expect("lookup must not error")
+            .expect("sharded-created file must be findable on disk");
+        let created = fs
+            .read_inode(&cx, InodeNumber(u64::from(entry.inode)))
+            .expect("read created inode");
+        assert_eq!(
+            created.mode & 0xF000,
+            0x8000,
+            "created inode must be a regular file (S_IFREG)"
+        );
+
+        let inodes_free_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        assert_eq!(
+            inodes_free_after,
+            inodes_free_before - 1,
+            "exactly one inode allocated through the sharded path"
         );
     }
 
