@@ -147,17 +147,23 @@ pub fn write_inode_at(
     let ino32 = ino.0 as u32;
     compute_and_set_checksum(raw, csum_seed, ino32);
 
-    // Read the block, patch the inode bytes, write back.
-    let buf = dev.read_block(cx, loc.block)?;
-    let mut block_data = buf.as_slice().to_vec();
-    if loc.byte_offset + inode_size > block_data.len() {
+    // Read the block, patch the inode bytes IN PLACE, write back. `make_mut` is
+    // COW (`Arc::make_mut`): when the freshly-read block is uniquely owned it hands
+    // back the existing buffer with no copy — eliminating the per-inode-write 4 KiB
+    // heap alloc + memcpy the old `buf.as_slice().to_vec()` always paid; when the
+    // buffer is shared (cached) it clones once, exactly as `to_vec` did. Pareto and
+    // byte-identical: the same patched block is written either way.
+    let mut buf = dev.read_block(cx, loc.block)?;
+    if loc.byte_offset + inode_size > buf.as_slice().len() {
         return Err(FfsError::Corruption {
             block: loc.block.0,
             detail: "inode extends beyond block boundary".into(),
         });
     }
-    block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(raw);
-    dev.write_block(cx, loc.block, &block_data)?;
+    // `make_mut()`'s borrow ends at this statement, so the immutable `as_slice()`
+    // below is a fresh borrow (no overlap).
+    buf.make_mut()[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(raw);
+    dev.write_block(cx, loc.block, buf.as_slice())?;
 
     Ok(())
 }

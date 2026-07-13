@@ -44,5 +44,9 @@ harness = false
 name = "file_device_read"
 harness = false
 
+[[bench]]
+name = "inode_block_patch"
+harness = false
+
 [lints]
 workspace = true
