@@ -1233,8 +1233,15 @@ impl ShardedMvccStore {
                 Some(&staged.merge_proof),
                 install_ctx,
             );
-            // A version now exists; enable the version-aware read path. Set before
-            // publish so any snapshot that can see this commit also sees the flag.
+        }
+        // A version now exists; enable the version-aware read path. Set before
+        // publish so any snapshot that can see this commit also sees the flag.
+        // Monotonic (never clears), so a relaxed load guards the Release store:
+        // after the first-ever install this is a no-op, avoiding a redundant
+        // per-commit (previously per-BLOCK) store that dirties a cache line EVERY
+        // read loads (any_version_installed at read fast paths) — committer↔reader
+        // false sharing on the parallel path.
+        if !self.any_version_installed.load(Ordering::Relaxed) {
             self.any_version_installed.store(true, Ordering::Release);
         }
 
@@ -1308,7 +1315,9 @@ impl ShardedMvccStore {
                 install_ctx,
             );
         }
-        if !write_keys.is_empty() {
+        // Monotonic flag; relaxed-load guard skips the redundant Release store
+        // (and its committer↔reader false sharing) after the first-ever install.
+        if !write_keys.is_empty() && !self.any_version_installed.load(Ordering::Relaxed) {
             self.any_version_installed.store(true, Ordering::Release);
         }
 
