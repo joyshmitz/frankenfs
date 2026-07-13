@@ -386,6 +386,36 @@ pub fn prepare_inode(
         None => 0,
     };
 
+    let new_generation = old_generation.wrapping_add(1);
+    debug!(
+        target: "ffs::inode::generation",
+        ino = alloc.ino.0,
+        old_generation,
+        new_generation,
+        "inode_generation_bump"
+    );
+    let inode = build_fresh_inode(mode, uid, gid, is_dir, new_generation, now_secs, now_nsec);
+
+    Ok((alloc.ino, inode))
+}
+
+/// Build a fresh regular-file / directory [`Ext4Inode`] body — NO allocation,
+/// NO I/O. This is the pure construction half of [`prepare_inode`], extracted
+/// verbatim so the sharded parallel-create path (bd-bhh0i) can reuse the EXACT
+/// same field initialization off a lock-free-allocated inode number without
+/// duplicating (and risking divergence from) it. `generation` is the
+/// already-bumped NFS generation counter (`old + 1`); the caller reads the old
+/// value and logs the bump.
+#[must_use]
+pub fn build_fresh_inode(
+    mode: u16,
+    uid: u32,
+    gid: u32,
+    is_dir: bool,
+    generation: u32,
+    now_secs: u64,
+    now_nsec: u32,
+) -> Ext4Inode {
     // Initialize extent tree root (empty tree: magic + 0 entries, max 4, depth 0).
     // NB: `vec![0;60].into()` (From<Vec> = SmallVec spill, reusing the jemalloc
     // buffer) benchmarks FASTER here than a stack-array `.as_slice().into()`
@@ -402,7 +432,7 @@ pub fn prepare_inode(
 
     #[allow(clippy::cast_possible_truncation)]
     let now_lo = now_secs as u32;
-    let inode = Ext4Inode {
+    Ext4Inode {
         mode,
         uid,
         gid,
@@ -411,17 +441,7 @@ pub fn prepare_inode(
         blocks: 0,
         flags: EXT4_EXTENTS_FL,
         version: 0,
-        generation: {
-            let new_gen = old_generation.wrapping_add(1);
-            debug!(
-                target: "ffs::inode::generation",
-                ino = alloc.ino.0,
-                old_generation,
-                new_generation = new_gen,
-                "inode_generation_bump"
-            );
-            new_gen
-        },
+        generation,
         file_acl: 0,
         atime: now_lo,
         ctime: now_lo,
@@ -439,9 +459,7 @@ pub fn prepare_inode(
         extent_bytes: extent_bytes.into(),
         xattr_ibody: Vec::new(),
         number: 0,
-    };
-
-    Ok((alloc.ino, inode))
+    }
 }
 
 /// Allocate and persist a fresh inode with its initial body. Equivalent to
