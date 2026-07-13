@@ -20,11 +20,12 @@
 //! compressed reads should avoid waking the full global rayon pool, while many
 //! small files should not pay one dedicated-pool `install()` per file.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
 use std::cell::RefCell;
 use std::hint::black_box;
+use std::sync::Arc;
 
 const N: usize = 16; // compressed extents in the read (≈2 MiB read)
 const LARGE_N: usize = 272; // ≈34 MiB compressed-read fan-out from bd-defgb
@@ -241,6 +242,66 @@ fn decompress_tiny_frames_reused_serial(blobs: &[Vec<u8>]) -> usize {
             })
         })
         .sum()
+}
+
+fn cache_arc_slice_copy(decompressed: Vec<u8>) -> (Arc<[u8]>, [u8; 4096]) {
+    let mut window = [0_u8; 4096];
+    window.copy_from_slice(&decompressed[4096..8192]);
+    let full = Arc::from(decompressed.into_boxed_slice());
+    (full, window)
+}
+
+fn cache_arc_vec_move(decompressed: Vec<u8>) -> (Arc<Vec<u8>>, [u8; 4096]) {
+    let mut window = [0_u8; 4096];
+    window.copy_from_slice(&decompressed[4096..8192]);
+    let full = Arc::new(decompressed);
+    (full, window)
+}
+
+fn bench_decompressed_cache_admission(c: &mut Criterion) {
+    if !should_build_group(&[
+        "btrfs_decompressed_cache_admit_128k",
+        "arc_slice_copy_a",
+        "arc_slice_copy_b",
+        "arc_vec_move",
+    ]) {
+        return;
+    }
+
+    let template: Vec<u8> = (0..RAM).map(|i| prng(i as u64)).collect();
+    assert_eq!(template.len(), template.capacity());
+
+    let control = cache_arc_slice_copy(template.clone());
+    let candidate_input = template.clone();
+    let candidate_input_ptr = candidate_input.as_ptr();
+    let candidate = cache_arc_vec_move(candidate_input);
+    assert_eq!(control.0.as_ref(), candidate.0.as_slice());
+    assert_eq!(control.1, candidate.1);
+    assert_eq!(candidate_input_ptr, candidate.0.as_ptr());
+
+    let mut group = c.benchmark_group("btrfs_decompressed_cache_admit_128k");
+    group.bench_function("arc_slice_copy_a", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |decompressed| black_box(cache_arc_slice_copy(decompressed)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("arc_slice_copy_b", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |decompressed| black_box(cache_arc_slice_copy(decompressed)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("arc_vec_move", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |decompressed| black_box(cache_arc_vec_move(decompressed)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
 }
 
 fn bench_decompress(c: &mut Criterion) {
@@ -577,6 +638,7 @@ fn bench_lzo_segment_decode(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_decompressed_cache_admission,
     bench_decompress,
     bench_decompress_pool,
     bench_decompress_tiny_frames,

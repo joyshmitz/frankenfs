@@ -1188,7 +1188,8 @@ pub struct OpenFs {
     btrfs_dir_entry_cache: ShardedCache<u64, Arc<rustc_hash::FxHashMap<Vec<u8>, u64>>>,
     /// Read-only decompressed compressed-extent cache (bd-4tw2n), keyed by the
     /// compressed extent's `disk_bytenr` -> the FULL decompressed extent bytes
-    /// (`Arc<[u8]>`). A random 4 KiB read of a 128 KiB compressed extent
+    /// (`Arc<Vec<u8>>`, retaining the decoder-owned allocation). A random 4 KiB
+    /// read of a 128 KiB compressed extent
     /// otherwise re-reads the compressed blob AND re-decompresses the whole
     /// extent every time (zstd/zlib/lzo cannot partial-decompress -> ~32x read
     /// amplification + per-read decode CPU), whereas the kernel page-cache
@@ -1201,7 +1202,7 @@ pub struct OpenFs {
     /// (sequential) path decompresses straight into the output window and never
     /// caches, preserving its bounded memory. Bounded by
     /// `BTRFS_DECOMPRESSED_EXTENT_CACHE_LIMIT`.
-    btrfs_decompressed_extent_cache: ShardedCache<u64, Arc<[u8]>>,
+    btrfs_decompressed_extent_cache: ShardedCache<u64, Arc<Vec<u8>>>,
 }
 
 struct Ext4WriteExtentSnapshot {
@@ -10153,7 +10154,7 @@ impl OpenFs {
                                     extent_offset,
                                     extent_delta,
                                     chunk.len(),
-                                    &full,
+                                    full.as_slice(),
                                 )
                                 .map(|slice| {
                                     chunk.copy_from_slice(slice);
@@ -10185,8 +10186,7 @@ impl OpenFs {
                                                 // above. Bounded by the admission cap;
                                                 // only the partial-slice path fills it.
                                                 if decomp_cache_enabled {
-                                                    let full: Arc<[u8]> =
-                                                        Arc::from(decompressed.into_boxed_slice());
+                                                    let full = Arc::new(decompressed);
                                                     self.btrfs_decompressed_extent_cache
                                                         .insert_within(
                                                             disk_bytenr,
