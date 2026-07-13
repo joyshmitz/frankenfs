@@ -903,15 +903,26 @@ supplies it.
    Round-trip integration test (`ext4_sharded_free_blocks_wrapper_round_trips_bd_bhh0i`,
    real mkfs) alloc-3→free-3→re-alloc-a-freed-block; feature suite 13/13 remote.
    Feature-gated → default byte-identical.
-2. **NEXT** — `ShardedTreeBlockAllocator` impl `ffs_btree::BlockAllocator` over
-   `&OpenFs`+geo: `alloc_block`→`ext4_sharded_alloc_blocks`(+hint update),
-   `free_block`→`ext4_sharded_free_blocks`, `finalize_node`→CRC stamp (copy
-   `GroupBlockAllocator::finalize_node`, keyed on csum_seed+ino+generation). The
-   extent-tree-meta allocator the four growth sites need. NOTE the borrow snag that
-   makes growth "all-or-nothing": each growth helper currently holds `&mut alloc`
-   for BOTH `alloc_blocks_persist` AND the `GroupBlockAllocator{ groups: &mut
-   alloc.groups }` inside `ffs_btree::insert` — this tree allocator is what lets
-   the `insert` call go through the sharded structure so the whole helper can drop
-   the single-lock `&mut alloc`. Unit-test it standalone (impl the 3 trait methods,
-   assert alloc/free round-trip + a metadata_csum finalize_node stamp) before
-   threading it through the `DirAllocBackend` growth path.
+2. ✅ DONE (`aa379836`) — `ShardedTreeBlockAllocator` impl `ffs_btree::BlockAllocator`
+   over `&OpenFs`+geo: `alloc_block`→`ext4_sharded_alloc_blocks`(+hint update),
+   `free_block`→`ext4_sharded_free_blocks`, `finalize_node`→CRC stamp (keyed on
+   csum_seed+ino+generation, snapshotted lock-free at construction). The
+   extent-tree-meta allocator the four growth sites need. Tests: trait round-trip
+   (2 distinct blocks, hint advances, total_free −2 → free → restored) +
+   finalize_node byte-matches a direct keyed stamp; feature suite 15/15.
+3. **NEXT** — extend the `DirAllocBackend` seam with a tree-node INSERT method so a
+   growth helper makes exactly ONE alloc borrow. The borrow snag: each growth helper
+   holds `&mut alloc` for BOTH `alloc_blocks_persist` (→ `dir_alloc_blocks`) AND the
+   `GroupBlockAllocator{ groups: &mut alloc.groups }` inside `ffs_btree::insert` —
+   two `&mut alloc` borrows can't coexist once threaded through a `&mut dyn
+   DirAllocBackend`. Fix: add e.g. `DirAllocBackend::insert_extent(&mut self, cx,
+   dev, root_bytes, extent, ino, generation, hint)` (or a `with_tree_allocator`
+   closure) that runs `ffs_btree::insert` with the backend-appropriate allocator —
+   `SingleLockDirAlloc` builds a `GroupBlockAllocator{ &mut self.alloc.groups }`
+   (BYTE-IDENTICAL to today), `ShardedDirAlloc` builds a `ShardedTreeBlockAllocator{
+   self.fs }`. Additive, both impls, single-lock byte-identical → remote-gatable
+   (compile + create/mkdir/rename + conformance; NO e2fsck yet). THEN slice 4:
+   thread `DirAllocBackend` (with this insert method) through the four growth
+   helpers, single-lock caller passing `SingleLockDirAlloc` → byte-identical;
+   `ext4_add_dir_entry_sharded`/`ext4_create_sharded` pass `ShardedDirAlloc`. THEN
+   the atomic cutover + LOCAL e2fsck/create-bench gate (greenlit) + flip default.
