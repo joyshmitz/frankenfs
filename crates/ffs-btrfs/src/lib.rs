@@ -6028,23 +6028,23 @@ impl BtrfsExtentAllocator {
             item_type: u8::MAX,
             offset: u64::MAX,
         };
-        let to_remove: Vec<BtrfsKey> = self
-            .extent_tree
-            .range(&lo, &hi)?
-            .into_iter()
-            .filter_map(|(key, value)| {
-                // Skinny METADATA_ITEM value: extent_item (24 bytes) followed by
-                // an inline ref { u8 type = TREE_BLOCK_REF (176), __le64 root }.
-                if key.item_type != BTRFS_ITEM_METADATA_ITEM || value.len() < 33 {
-                    return None;
-                }
-                if value[24] != BTRFS_ITEM_TREE_BLOCK_REF {
-                    return None;
-                }
-                let root = u64::from_le_bytes(value[25..33].try_into().ok()?);
-                roots.contains(&root).then_some(key)
-            })
-            .collect();
+        let mut to_remove = Vec::new();
+        self.extent_tree.range_with(&lo, &hi, |key, value| {
+            // Skinny METADATA_ITEM value: extent_item (24 bytes) followed by
+            // an inline ref { u8 type = TREE_BLOCK_REF (176), __le64 root }.
+            if key.item_type != BTRFS_ITEM_METADATA_ITEM || value.len() < 33 {
+                return;
+            }
+            if value[24] != BTRFS_ITEM_TREE_BLOCK_REF {
+                return;
+            }
+            let mut root_bytes = [0_u8; 8];
+            root_bytes.copy_from_slice(&value[25..33]);
+            let root = u64::from_le_bytes(root_bytes);
+            if roots.contains(&root) {
+                to_remove.push(key);
+            }
+        })?;
         let removed = to_remove.len();
         for key in to_remove {
             self.extent_tree.delete(&key)?;
@@ -17015,6 +17015,56 @@ mod tests {
                 (bg_start + 0xc000, bg_len - 0xc000),
             ],
             "loaded metadata blocks must be excluded from free space"
+        );
+    }
+
+    #[test]
+    fn remove_metadata_items_owned_by_roots_preserves_other_items_bd_opb6l() {
+        let mut alloc = BtrfsExtentAllocator::new(17).expect("allocator");
+        let rewritten_roots = [
+            BTRFS_ROOT_TREE_OBJECTID,
+            BTRFS_EXTENT_TREE_OBJECTID,
+            BTRFS_FS_TREE_OBJECTID,
+            BTRFS_CSUM_TREE_OBJECTID,
+        ];
+        let preserved_root = BTRFS_CHUNK_TREE_OBJECTID;
+        let metadata_items = [
+            (0x10_0000, rewritten_roots[0]),
+            (0x20_0000, rewritten_roots[1]),
+            (0x30_0000, rewritten_roots[2]),
+            (0x40_0000, rewritten_roots[3]),
+            (0x50_0000, preserved_root),
+        ];
+
+        for (bytenr, owner_root) in metadata_items {
+            alloc
+                .insert_self_metadata_item(bytenr, 0, owner_root, 17)
+                .expect("insert metadata item");
+        }
+
+        let removed = alloc
+            .remove_metadata_items_owned_by_roots(&rewritten_roots)
+            .expect("remove rewritten-root metadata items");
+        assert_eq!(removed, rewritten_roots.len());
+
+        for (bytenr, owner_root) in metadata_items {
+            let key = BtrfsKey {
+                objectid: bytenr,
+                item_type: BTRFS_ITEM_METADATA_ITEM,
+                offset: 0,
+            };
+            assert_eq!(
+                alloc.extent_tree().get(&key).is_some(),
+                owner_root == preserved_root,
+                "metadata ownership filtering diverged for root {owner_root}"
+            );
+        }
+        assert_eq!(
+            alloc
+                .remove_metadata_items_owned_by_roots(&rewritten_roots)
+                .expect("repeat removal"),
+            0,
+            "removal must be idempotent once rewritten-root items are gone"
         );
     }
 

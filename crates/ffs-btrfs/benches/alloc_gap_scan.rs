@@ -19,8 +19,10 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_BLOCK_GROUP_DATA, BTRFS_ITEM_EXTENT_ITEM, BTRFS_ITEM_METADATA_ITEM, BlockGroupFreeSpace,
-    BtrfsBTree, BtrfsBlockGroupItem, BtrfsExtentAllocator, BtrfsKey,
+    BTRFS_BLOCK_GROUP_DATA, BTRFS_CHUNK_TREE_OBJECTID, BTRFS_CSUM_TREE_OBJECTID,
+    BTRFS_EXTENT_TREE_OBJECTID, BTRFS_FS_TREE_OBJECTID, BTRFS_ITEM_EXTENT_ITEM,
+    BTRFS_ITEM_METADATA_ITEM, BTRFS_ITEM_TREE_BLOCK_REF, BTRFS_ROOT_TREE_OBJECTID,
+    BlockGroupFreeSpace, BtrfsBTree, BtrfsBlockGroupItem, BtrfsExtentAllocator, BtrfsKey,
 };
 use std::hint::black_box;
 
@@ -338,12 +340,119 @@ fn bench_commit_accounting_free_space(c: &mut Criterion) {
     group.finish();
 }
 
+const REWRITTEN_ROOTS: [u64; 4] = [
+    BTRFS_ROOT_TREE_OBJECTID,
+    BTRFS_EXTENT_TREE_OBJECTID,
+    BTRFS_FS_TREE_OBJECTID,
+    BTRFS_CSUM_TREE_OBJECTID,
+];
+
+fn build_rewritten_metadata_allocator() -> BtrfsExtentAllocator {
+    let mut alloc = build_largest_free_allocator();
+    for (index, owner_root) in REWRITTEN_ROOTS
+        .into_iter()
+        .chain(std::iter::once(BTRFS_CHUNK_TREE_OBJECTID))
+        .enumerate()
+    {
+        alloc
+            .insert_self_metadata_item(
+                BG_START + (E as u64 + index as u64) * EXT_SIZE,
+                0,
+                owner_root,
+                7,
+            )
+            .expect("insert rewritten-root metadata item");
+    }
+    alloc
+}
+
+fn rewritten_metadata_key(key: BtrfsKey, value: &[u8]) -> Option<BtrfsKey> {
+    if key.item_type != BTRFS_ITEM_METADATA_ITEM || value.len() < 33 {
+        return None;
+    }
+    if value[24] != BTRFS_ITEM_TREE_BLOCK_REF {
+        return None;
+    }
+    let mut root_bytes = [0_u8; 8];
+    root_bytes.copy_from_slice(&value[25..33]);
+    let root = u64::from_le_bytes(root_bytes);
+    REWRITTEN_ROOTS.contains(&root).then_some(key)
+}
+
+/// Frozen control: materialize and clone every extent-tree payload before
+/// retaining only rewritten-root metadata keys.
+fn materialized_rewritten_metadata_keys(alloc: &BtrfsExtentAllocator) -> Vec<BtrfsKey> {
+    let lo = BtrfsKey {
+        objectid: 0,
+        item_type: 0,
+        offset: 0,
+    };
+    let hi = BtrfsKey {
+        objectid: u64::MAX,
+        item_type: u8::MAX,
+        offset: u64::MAX,
+    };
+    alloc
+        .extent_tree()
+        .range(&lo, &hi)
+        .expect("materialized extent-tree scan")
+        .into_iter()
+        .filter_map(|(key, value)| rewritten_metadata_key(key, &value))
+        .collect()
+}
+
+/// Candidate: traverse the identical key range and inspect each payload in
+/// place, retaining only the matching keys needed by the delete phase.
+fn borrowed_rewritten_metadata_keys(alloc: &BtrfsExtentAllocator) -> Vec<BtrfsKey> {
+    let lo = BtrfsKey {
+        objectid: 0,
+        item_type: 0,
+        offset: 0,
+    };
+    let hi = BtrfsKey {
+        objectid: u64::MAX,
+        item_type: u8::MAX,
+        offset: u64::MAX,
+    };
+    let mut keys = Vec::new();
+    alloc
+        .extent_tree()
+        .range_with(&lo, &hi, |key, value| {
+            if let Some(key) = rewritten_metadata_key(key, value) {
+                keys.push(key);
+            }
+        })
+        .expect("borrowed extent-tree scan");
+    keys
+}
+
+fn bench_rewritten_metadata_keyscan(c: &mut Criterion) {
+    let alloc = build_rewritten_metadata_allocator();
+    let control = materialized_rewritten_metadata_keys(&alloc);
+    let candidate = borrowed_rewritten_metadata_keys(&alloc);
+    assert_eq!(control, candidate, "borrowed scan changed selected keys");
+    assert_eq!(candidate.len(), REWRITTEN_ROOTS.len());
+
+    let mut group = c.benchmark_group("btrfs_rewritten_metadata_keyscan_4101");
+    group.bench_function("materialized_control_a", |b| {
+        b.iter(|| black_box(materialized_rewritten_metadata_keys(black_box(&alloc))));
+    });
+    group.bench_function("materialized_control_b", |b| {
+        b.iter(|| black_box(materialized_rewritten_metadata_keys(black_box(&alloc))));
+    });
+    group.bench_function("borrowed_range_with", |b| {
+        b.iter(|| black_box(borrowed_rewritten_metadata_keys(black_box(&alloc))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_alloc_gap_scan,
     bench_largest_free_extent,
     bench_free_space_extents,
     bench_sync_block_group_accounting,
-    bench_commit_accounting_free_space
+    bench_commit_accounting_free_space,
+    bench_rewritten_metadata_keyscan
 );
 criterion_main!(benches);
