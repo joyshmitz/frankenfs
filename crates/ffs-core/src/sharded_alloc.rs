@@ -201,6 +201,71 @@ impl PerGroupAlloc {
         .transpose()
     }
 
+    /// Sharded per-group block FREE (bd-bhh0i): free `count` blocks starting at
+    /// `start`, which MUST lie entirely within one group (a tree-node block or one
+    /// same-group extent segment — the only runs the sharded growth/free path
+    /// produces). Locks ONLY the owning group and composes
+    /// [`ffs_alloc::free_blocks_in_group`] over the locked `&mut GroupStats`
+    /// (reading that group's pre-populated `reserved_cache`), mirroring how
+    /// [`Self::alloc_blocks`] composes the alloc core — so disjoint-group frees
+    /// never contend.
+    ///
+    /// The single-lock `free_blocks_persist` SPLITS a cross-group run into
+    /// per-group segments; this single-group primitive instead REJECTS a run that
+    /// would cross the group boundary (`Corruption`) rather than silently mutating
+    /// the neighbor group. No sharded caller produces such a run, so this is a
+    /// defensive guard, not a behavior change on real inputs. `count == 0` is a
+    /// no-op (matching `free_blocks_persist`'s empty-segment result).
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn free_blocks(
+        &self,
+        cx: &asupersync::Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        geo: &ffs_alloc::FsGeometry,
+        start: ffs_types::BlockNumber,
+        count: u32,
+        pctx: &ffs_alloc::PersistCtx,
+    ) -> Result<(), ffs_error::FfsError> {
+        if count == 0 {
+            return Ok(());
+        }
+        let (group, rel_start) = geo.absolute_to_group_block(start);
+        let gidx = group.0 as usize;
+        if gidx >= self.groups.len() {
+            return Err(ffs_error::FfsError::Corruption {
+                block: start.0,
+                detail: "sharded free: block group out of range".into(),
+            });
+        }
+        let group_blocks = geo.blocks_in_group(group);
+        match rel_start.checked_add(count) {
+            Some(end) if end <= group_blocks => {}
+            _ => {
+                return Err(ffs_error::FfsError::Corruption {
+                    block: start.0,
+                    detail: "sharded free: run crosses block-group boundary".into(),
+                });
+            }
+        }
+        let mut stats = self.lock_group(gidx);
+        // Read this locked group's own pre-populated reserved set. The Arc clone
+        // releases the `reserved_cache` borrow before the `&mut stats` call below;
+        // empty only if unpopulated (never, under the feature) — same as
+        // `alloc_blocks`.
+        let reserved = stats.reserved_cache.get().cloned().unwrap_or_default();
+        ffs_alloc::free_blocks_in_group(
+            cx,
+            dev,
+            geo,
+            &mut stats,
+            group,
+            rel_start,
+            count,
+            pctx,
+            &reserved,
+        )
+    }
+
     /// Sharded per-group inode allocation (bd-bhh0i Part A): walk the
     /// target→±neighbors→full order, locking ONE group at a time, and allocate an
     /// inode in the first group that can satisfy. Simpler than `alloc_blocks` —

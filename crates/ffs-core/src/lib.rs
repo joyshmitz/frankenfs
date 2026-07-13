@@ -17539,6 +17539,33 @@ impl OpenFs {
         sharded.alloc_blocks(cx, dev, &geo, hint, count, &pctx)
     }
 
+    /// Sharded (no-write-lock) block FREE for the bd-bhh0i parallel-create cutover
+    /// — the free counterpart to [`Self::ext4_sharded_alloc_blocks`]. Derives the
+    /// immutable geo + [`PersistCtx`] lock-free and routes to
+    /// [`PerGroupAlloc::free_blocks`], which locks only the group owning `start`.
+    /// Same device the single-lock `free_blocks_persist` writes bitmaps through, so
+    /// on-disk effects are identical for the same starting state. `start`+`count`
+    /// must lie within one group (a tree-node block or same-group extent segment —
+    /// what the sharded growth/free path produces).
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_free_blocks(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        start: BlockNumber,
+        count: u32,
+    ) -> Result<(), FfsError> {
+        let sharded = self.ext4_sharded_alloc.as_ref().ok_or(FfsError::ReadOnly)?;
+        let sb = self.ext4_superblock().ok_or_else(|| {
+            FfsError::Format("sharded block free: not an ext4 filesystem".into())
+        })?;
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = self.ext4_persist_ctx_lockfree().ok_or_else(|| {
+            FfsError::Format("sharded block free: persist ctx unavailable".into())
+        })?;
+        sharded.free_blocks(cx, dev, &geo, start, count, &pctx)
+    }
+
     /// Sharded (no-write-lock) inode allocation for the bd-bhh0i parallel-create
     /// cutover (third wiring slice). Mirrors [`Self::ext4_sharded_alloc_blocks`]
     /// on the inode side: derives geo + [`PersistCtx`] lock-free and routes to
@@ -61885,6 +61912,77 @@ mod tests {
             total_after,
             total_before - 3,
             "wrapper allocs must debit total_free by exactly 3"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_free_blocks_wrapper_round_trips_bd_bhh0i() {
+        // Free is the counterpart to alloc: allocating N blocks then freeing each
+        // back through the lock-free wrapper must restore total_free EXACTLY and
+        // actually clear the bitmap bits (proven by re-allocating a just-freed
+        // block). Same real mkfs image + lock-free geo/pctx derivation as the alloc
+        // wrapper test.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let hint = AllocHint::default();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .blocks;
+
+        let mut allocated = Vec::new();
+        for call in 0..3 {
+            let alloc = fs
+                .ext4_sharded_alloc_blocks(&cx, &dev, &hint, 1)
+                .unwrap_or_else(|e| panic!("alloc call {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("alloc call {call} found no free block"));
+            assert_eq!(alloc.count, 1, "call {call}: expected exactly one block");
+            allocated.push(alloc.start);
+        }
+        let total_after_alloc = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            total_after_alloc,
+            total_before - 3,
+            "3 allocs must debit total_free by 3"
+        );
+
+        for (call, &start) in allocated.iter().enumerate() {
+            fs.ext4_sharded_free_blocks(&cx, &dev, start, 1)
+                .unwrap_or_else(|e| panic!("free call {call} errored: {e:?}"));
+        }
+        let total_after_free = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            total_after_free, total_before,
+            "freeing all 3 must restore total_free to the pre-alloc value"
+        );
+
+        // Re-allocating must now hand back one of the just-freed blocks — proving
+        // the free actually cleared the bitmap bit (else first-fit would skip it).
+        let realloc = fs
+            .ext4_sharded_alloc_blocks(&cx, &dev, &hint, 1)
+            .expect("realloc after free must not error")
+            .expect("realloc after free must find a block");
+        assert!(
+            allocated.contains(&realloc.start),
+            "a freed block must be re-allocatable: got {:?}, freed {:?}",
+            realloc.start,
+            allocated
         );
     }
 
