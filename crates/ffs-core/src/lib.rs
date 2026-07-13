@@ -705,6 +705,29 @@ trait DirAllocBackend {
         inode: &Ext4Inode,
         csum_seed: u32,
     ) -> Result<(), FfsError>;
+
+    /// Insert `extent` into the parent directory's extent tree (`root_bytes`),
+    /// allocating any new external tree-node blocks through this backend's own
+    /// allocator. Encapsulating the `ffs_btree::insert` here is what lets a growth
+    /// helper make exactly ONE alloc borrow: today each helper holds `&mut alloc`
+    /// for BOTH `alloc_blocks_persist` (→ [`Self::dir_alloc_blocks`]) AND the
+    /// `GroupBlockAllocator{ groups: &mut alloc.groups }` inside `ffs_btree::insert`,
+    /// which cannot coexist once the helper is threaded through a `&mut dyn
+    /// DirAllocBackend`. `SingleLock` builds that same `GroupBlockAllocator`
+    /// (byte-identical to the helpers' inline insert); `Sharded` builds a
+    /// [`ShardedTreeBlockAllocator`]. `tree_hint` is the caller-computed placement
+    /// hint for the tree nodes; `ino`/`generation` key the external-node CRC32C.
+    #[allow(clippy::too_many_arguments)]
+    fn dir_insert_extent(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        extent: Ext4Extent,
+        ino: u32,
+        generation: u32,
+        tree_hint: ffs_alloc::AllocHint,
+    ) -> Result<(), FfsError>;
 }
 
 /// [`DirAllocBackend`] over the single-lock `Ext4AllocState` — byte-identical to
@@ -753,6 +776,32 @@ impl DirAllocBackend for SingleLockDirAlloc<'_> {
             csum_seed,
         )
     }
+    #[allow(clippy::too_many_arguments)]
+    fn dir_insert_extent(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        extent: Ext4Extent,
+        ino: u32,
+        generation: u32,
+        tree_hint: ffs_alloc::AllocHint,
+    ) -> Result<(), FfsError> {
+        // Byte-identical to the growth helpers' inline tree insert: the SAME
+        // `GroupBlockAllocator` over `&mut self.alloc.groups` + the SAME
+        // `ffs_btree::insert` call.
+        let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+            cx,
+            dev,
+            geo: &self.alloc.geo,
+            groups: &mut self.alloc.groups,
+            hint: tree_hint,
+            pctx: &self.alloc.persist_ctx,
+            ino,
+            generation,
+        };
+        ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)
+    }
 }
 
 /// [`DirAllocBackend`] over the sharded per-group allocator — the lock-free
@@ -790,6 +839,27 @@ impl DirAllocBackend for ShardedDirAlloc<'_> {
     ) -> Result<(), FfsError> {
         self.fs
             .ext4_sharded_write_inode(cx, dev, ino, inode, csum_seed)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn dir_insert_extent(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        extent: Ext4Extent,
+        ino: u32,
+        generation: u32,
+        tree_hint: ffs_alloc::AllocHint,
+    ) -> Result<(), FfsError> {
+        // Sharded tree-node allocation: build a `ShardedTreeBlockAllocator` (borrows
+        // only `&OpenFs`, locks groups internally) and run the SAME
+        // `ffs_btree::insert`, so the tree-node allocs go through the sharded
+        // structure with no single-lock `&mut alloc` borrow.
+        let mut tree_alloc =
+            ShardedTreeBlockAllocator::new(self.fs, dev, tree_hint, ino, generation).ok_or_else(
+                || FfsError::Format("sharded dir insert: not an ext4 filesystem".into()),
+            )?;
+        ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)
     }
 }
 
