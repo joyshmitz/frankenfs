@@ -452,6 +452,47 @@ fn bench_readahead_empty_head_ownership_no_tail(c: &mut Criterion) {
     group.finish();
 }
 
+fn encode_xattr_names_control(names: &[String]) -> Vec<u8> {
+    let total_len = names.iter().map(|name| name.len() + 1).sum();
+    let mut bytes = Vec::with_capacity(total_len);
+    for name in names {
+        bytes.extend_from_slice(name.as_bytes());
+        bytes.push(0);
+    }
+    bytes
+}
+
+fn xattr_names_encoded_len(names: &[String]) -> usize {
+    names.iter().map(|name| name.len() + 1).sum()
+}
+
+fn bench_listxattr_size_probe_payload_elision(c: &mut Criterion) {
+    let names: Vec<String> = (0..24)
+        .map(|index| format!("user.frankenfs_attribute_{index:02}"))
+        .collect();
+    let encoded = encode_xattr_names_control(&names);
+    assert_eq!(encoded.len(), xattr_names_encoded_len(&names));
+    assert_eq!(
+        encoded.iter().filter(|&&byte| byte == 0).count(),
+        names.len()
+    );
+
+    let mut group = c.benchmark_group("mount_runtime_listxattr_size_probe_24");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+    group.bench_function("encode_payload_a", |b| {
+        b.iter(|| black_box(encode_xattr_names_control(black_box(&names))));
+    });
+    group.bench_function("encode_payload_b", |b| {
+        b.iter(|| black_box(encode_xattr_names_control(black_box(&names))));
+    });
+    group.bench_function("length_only", |b| {
+        b.iter(|| black_box(xattr_names_encoded_len(black_box(&names))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     mount_runtime,
     bench_per_core_route_hash_ab,
@@ -466,5 +507,6 @@ criterion_group!(
     bench_writeback_cache_batching,
     bench_readahead_empty_head_ownership,
     bench_readahead_empty_head_ownership_no_tail,
+    bench_listxattr_size_probe_payload_elision,
 );
 criterion_main!(mount_runtime);

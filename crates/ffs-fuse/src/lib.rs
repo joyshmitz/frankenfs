@@ -2816,8 +2816,12 @@ impl FrankenFuse {
         }
     }
 
+    fn xattr_names_encoded_len(names: &[String]) -> usize {
+        names.iter().map(|name| name.len() + 1).sum()
+    }
+
     fn encode_xattr_names(names: &[String]) -> Vec<u8> {
-        let total_len = names.iter().map(|name| name.len() + 1).sum();
+        let total_len = Self::xattr_names_encoded_len(names);
         let mut bytes = Vec::with_capacity(total_len);
         for name in names {
             bytes.extend_from_slice(name.as_bytes());
@@ -6295,6 +6299,13 @@ impl Filesystem for FrankenFuse {
             self.inner.ops.listxattr(cx, InodeNumber(ino))
         }) {
             Ok(names) => {
+                if size == 0 {
+                    match u32::try_from(Self::xattr_names_encoded_len(&names)) {
+                        Ok(payload_len) => reply.size(payload_len),
+                        Err(_) => reply.error(libc::EOVERFLOW),
+                    }
+                    return;
+                }
                 let payload = Self::encode_xattr_names(&names);
                 Self::reply_xattr_payload(size, &payload, reply);
             }
@@ -20121,6 +20132,7 @@ CUSTOM("congestion_threshold=3")"#;
                 let encoded = FrankenFuse::encode_xattr_names(&names);
                 let expected_len: usize = names.iter().map(|n| n.len() + 1).sum();
                 prop_assert_eq!(encoded.len(), expected_len);
+                prop_assert_eq!(FrankenFuse::xattr_names_encoded_len(&names), expected_len);
             }
 
             /// Each encoded name ends with NUL separator.
