@@ -18078,9 +18078,14 @@ impl OpenFs {
         let attr = inode_to_attr(sb, ino, &new_inode);
 
         // Add directory entry to parent.
-        if let Err(err) = self.ext4_add_dir_entry(
+        // bd-bhh0i: single-lock caller wraps the alloc guard in a byte-identical
+        // SingleLock backend; dropped before the error branch re-borrows `alloc`.
+        let mut backend = SingleLockDirAlloc {
+            alloc: &mut *alloc,
+        };
+        let add_result = self.ext4_add_dir_entry(
             cx,
-            &mut alloc,
+            &mut backend,
             parent,
             &parent_inode,
             name,
@@ -18089,7 +18094,9 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        ) {
+        );
+        drop(backend);
+        if let Err(err) = add_result {
             let mut rollback_inode = new_inode;
             let Ext4AllocState {
                 geo,
@@ -18268,9 +18275,14 @@ impl OpenFs {
 
         let attr = inode_to_attr(sb, ino, &new_inode);
 
-        if let Err(err) = self.ext4_add_dir_entry(
+        // bd-bhh0i: single-lock caller wraps the alloc guard (dropped before the
+        // error branch re-borrows `alloc`).
+        let mut backend = SingleLockDirAlloc {
+            alloc: &mut *alloc,
+        };
+        let add_result = self.ext4_add_dir_entry(
             cx,
-            &mut alloc,
+            &mut backend,
             parent,
             &parent_inode,
             name,
@@ -18279,7 +18291,9 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        ) {
+        );
+        drop(backend);
+        if let Err(err) = add_result {
             let mut rollback_inode = new_inode;
             let Ext4AllocState {
                 geo,
@@ -18489,9 +18503,14 @@ impl OpenFs {
 
         // Add directory entry to parent.
         // This will also update parent timestamps and size if needed.
-        if let Err(err) = self.ext4_add_dir_entry(
+        // bd-bhh0i: single-lock caller wraps the alloc guard (dropped before the
+        // error branch re-borrows `alloc`).
+        let mut backend = SingleLockDirAlloc {
+            alloc: &mut *alloc,
+        };
+        let add_result = self.ext4_add_dir_entry(
             cx,
-            &mut alloc,
+            &mut backend,
             parent,
             &parent_inode,
             name,
@@ -18500,7 +18519,9 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        ) {
+        );
+        drop(backend);
+        if let Err(err) = add_result {
             let Ext4AllocState {
                 geo,
                 groups,
@@ -18899,7 +18920,7 @@ impl OpenFs {
     fn ext4_add_dir_entry(
         &self,
         cx: &Cx,
-        alloc: &mut Ext4AllocState,
+        backend: &mut dyn DirAllocBackend,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
         name: &[u8],
@@ -18954,13 +18975,10 @@ impl OpenFs {
             let parent_generation = parent_inode.generation;
             let reserved_tail = self.ext4_dir_reserved_tail();
 
-            // bd-bhh0i: ONE backend for all of d's allocation — the in-place-insert
-            // parent write, the a/c growth calls, and the linear-grow append. Single
-            // lock = byte-identical; the cutover flips this to the `backend` param so
-            // the sharded create path passes a ShardedDirAlloc.
-            let mut backend = SingleLockDirAlloc {
-                alloc: &mut *alloc,
-            };
+            // bd-bhh0i: the injected `backend` param serves ALL of d's allocation —
+            // the in-place-insert parent write, the a/c growth calls, and the
+            // linear-grow append. Single-lock callers pass a byte-identical
+            // SingleLockDirAlloc; the sharded create path passes a ShardedDirAlloc.
 
             // htree (dx-indexed) directories: logical block 0 is the dx_root,
             // whose '..' rec_len slack hides the index. A linear add_entry would
@@ -19018,7 +19036,7 @@ impl OpenFs {
                         if let Some(()) = self.ext4_split_htree_leaf_and_add(
                             cx,
                             dev,
-                            &mut backend,
+                            &mut *backend,
                             parent,
                             parent_inode,
                             &extents,
@@ -19038,7 +19056,7 @@ impl OpenFs {
                     return self.ext4_rebuild_htree_dir(
                         cx,
                         dev,
-                        &mut backend,
+                        &mut *backend,
                         parent,
                         parent_inode,
                         &extents,
@@ -19067,7 +19085,7 @@ impl OpenFs {
                 return self.ext4_rebuild_htree_dir(
                     cx,
                     dev,
-                    &mut backend,
+                    &mut *backend,
                     parent,
                     parent_inode,
                     &extents,
@@ -20621,9 +20639,14 @@ impl OpenFs {
             csum_seed,
         )?;
 
-        if let Err(err) = self.ext4_add_dir_entry(
+        // bd-bhh0i: single-lock caller wraps the alloc guard (dropped before the
+        // error branch re-borrows `alloc`).
+        let mut backend = SingleLockDirAlloc {
+            alloc: &mut *alloc,
+        };
+        let add_result = self.ext4_add_dir_entry(
             cx,
-            &mut alloc,
+            &mut backend,
             new_parent,
             &new_parent_inode,
             new_name,
@@ -20632,7 +20655,9 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        ) {
+        );
+        drop(backend);
+        if let Err(err) = add_result {
             let block_dev = self.block_device_adapter();
             ffs_inode::write_inode(
                 cx,
@@ -20756,9 +20781,14 @@ impl OpenFs {
                 let Ext4AllocState { geo, groups, .. } = &mut *alloc;
                 ffs_inode::write_inode(cx, &block_dev, geo, groups, ino, &inode, csum_seed)?;
 
-                if let Err(err) = self.ext4_add_dir_entry(
+                // bd-bhh0i: single-lock caller wraps the alloc guard (dropped
+                // before the error branch re-borrows `alloc`).
+                let mut backend = SingleLockDirAlloc {
+                    alloc: &mut *alloc,
+                };
+                let add_result = self.ext4_add_dir_entry(
                     cx,
-                    &mut alloc,
+                    &mut backend,
                     parent,
                     &parent_inode,
                     name,
@@ -20767,7 +20797,9 @@ impl OpenFs {
                     csum_seed,
                     tstamp_secs,
                     tstamp_nanos,
-                ) {
+                );
+                drop(backend);
+                if let Err(err) = add_result {
                     let Ext4AllocState {
                         geo,
                         groups,
@@ -20817,9 +20849,14 @@ impl OpenFs {
 
             symlink_inode = self.read_inode(cx, ino)?;
             let mut alloc = alloc_mutex.write();
-            if let Err(err) = self.ext4_add_dir_entry(
+            // bd-bhh0i: single-lock caller wraps the alloc guard (dropped before
+            // the error branch re-borrows `alloc`).
+            let mut backend = SingleLockDirAlloc {
+                alloc: &mut *alloc,
+            };
+            let add_result = self.ext4_add_dir_entry(
                 cx,
-                &mut alloc,
+                &mut backend,
                 parent,
                 &parent_inode,
                 name,
@@ -20828,7 +20865,9 @@ impl OpenFs {
                 csum_seed,
                 tstamp_secs,
                 tstamp_nanos,
-            ) {
+            );
+            drop(backend);
+            if let Err(err) = add_result {
                 let block_dev = self.block_device_adapter();
                 let Ext4AllocState {
                     geo,
@@ -23129,9 +23168,14 @@ impl OpenFs {
         // and then failing, which would orphan the renamed inode (silent data
         // loss). On success the result is identical to remove-then-add.
         let new_parent_inode_fresh = self.read_inode(cx, new_parent)?;
-        self.ext4_add_dir_entry(
+        // bd-bhh0i: single-lock caller wraps the alloc guard (dropped before the
+        // subsequent source-entry removal re-borrows `alloc`).
+        let mut backend = SingleLockDirAlloc {
+            alloc: &mut *alloc,
+        };
+        let add_result = self.ext4_add_dir_entry(
             cx,
-            &mut alloc,
+            &mut backend,
             new_parent,
             &new_parent_inode_fresh,
             new_name,
@@ -23140,7 +23184,9 @@ impl OpenFs {
             csum_seed,
             tstamp_secs,
             tstamp_nanos,
-        )?;
+        );
+        drop(backend);
+        add_result?;
 
         // Re-acquire the block device adapter so subsequent reads/writes observe
         // the metadata committed while inserting the directory entry.
