@@ -811,6 +811,40 @@ the fold consumers to `total_free` — a focused, one-shot, e2fsck-gated pass (t
 floor + kernel target are all ready). No further characterization or feasibility work is
 needed.
 
+### 2026-07-13 — WIRING PROGRESS: primitives + agnostic insert DONE; growth-path is the final cohesive piece
+
+Landed (each additive, cfg-gated or byte-identical, validated feature-on):
+- Slices 1–7b (`fecd59ec`…`d91e9d8e`): ALL lock-free primitives — `ext4_persist_ctx_lockfree`,
+  `ext4_sharded_alloc_blocks`/`_inode`, `ext4_sharded_locate_inode`, `ffs_inode::build_fresh_inode`,
+  `ext4_sharded_create_inode` (full inode-create), `ext4_sharded_write_inode`,
+  `ext4_sharded_alloc_dir_block`.
+- Slice 8a (`60274361`): hoisted the parent-write out of `ext4_try_insert_existing` → it is now
+  ALLOCATOR-AGNOSTIC, so the sharded create reuses the tested common-case insert (htree
+  target-leaf + linear) verbatim; single-lock caller writes the parent after `Inserted`.
+
+**REMAINING = the growth path (the entangled, e2fsck-critical core).** Three growth fns +
+linear-grow allocate dir blocks and write the parent inode, all through `&mut alloc`:
+`ext4_split_htree_leaf_and_add` (~18875; alloc_blocks_persist @19027, write_inode @19122),
+`ext4_split_htree_dx_node_leaf_and_add` (~19140; alloc @19271, write_inode @19361),
+`ext4_rebuild_htree_dir` (~19385; alloc @19593, write_inode @19679), and the linear-grow in
+`ext4_add_dir_entry`. Each uses `alloc.geo` (block-size arithmetic — trivially lock-free via
+`FsGeometry::from_superblock`), `&mut alloc.groups` + `alloc.persist_ctx` (block alloc → replace
+with `ext4_sharded_alloc_blocks`), and `&alloc.groups` (parent write → replace with
+`ext4_sharded_write_inode`). It is ALL-OR-NOTHING: consistency requires EVERY growth alloc go
+through the sharded structure (a split of inode-allocs-to-sharded / block-allocs-to-single-lock
+diverges the free-state → e2fsck fail).
+
+**Design for the growth pass (do in ONE focused session):** thread a small `DirAllocBackend`
+enum/trait — `{ geo() -> FsGeometry, alloc_block(hint) -> Option<BlockAlloc>, write_inode(ino,
+&Ext4Inode) }` — through the four growth sites. `SingleLock(&mut Ext4AllocState)` impl =
+current behavior (BYTE-IDENTICAL, validated by create/mkdir/rename tests); `Sharded(&OpenFs)`
+impl = the slice-1–7b primitives. Then `ext4_add_dir_entry_sharded` composes agnostic
+`try_insert_existing` + backend-driven growth; `ext4_create_sharded` composes inode-create +
+that; the atomic switch flips the ops to the sharded path when flag-on; the local gate
+(mke2fs+create-bench+e2fsck, floor 0.48x vs kernel 4.8x recorded) validates + flips default.
+This backend refactor is best done as a focused unit (not dribbled), since it touches
+data-safety-critical allocation code the byte-identical `SingleLock` impl protects.
+
 This is the firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
 (≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
 runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
