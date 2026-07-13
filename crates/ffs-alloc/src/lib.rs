@@ -2862,6 +2862,120 @@ pub fn free_blocks_persist(
     Ok(())
 }
 
+/// Free `count` contiguous blocks that lie ENTIRELY within a single group,
+/// operating on that one group's `&mut GroupStats` under the caller's lock.
+///
+/// This is the per-group FREE counterpart to [`try_alloc_blocks_in_group`] (the
+/// per-group ALLOC core) — the bd-bhh0i sharded allocator composes it under a
+/// single per-group `Mutex` so disjoint-group frees never serialize, exactly as
+/// [`PerGroupAlloc::alloc_blocks`](../../ffs_core) composes the alloc core. It
+/// reproduces the single-segment path of [`free_blocks_persist`] verbatim:
+/// reserved-overlap check, double-free detection, range-clear, incremental
+/// bitmap-checksum, group-descriptor persist, and full rollback on a GDT-write
+/// failure. `reserved` is the caller-supplied reserved-block set for this group
+/// (the sharded caller reads it from the locked group's pre-populated
+/// `reserved_cache`; the single-lock analogue computes `reserved_blocks_in_group`).
+///
+/// [`free_blocks_persist`] is deliberately left UNTOUCHED (its multi-segment
+/// two-phase "validate every segment before writing any" property is preserved,
+/// so the single-lock path stays byte-identical); the
+/// `free_blocks_in_group_matches_free_blocks_persist_single_segment` differential
+/// test locks this replica to it byte-for-byte across csum/non-csum and
+/// single/multi-block shapes.
+///
+/// `rel_start` is the block's offset WITHIN `group` (i.e.
+/// `geo.absolute_to_group_block(abs).1`); `count` blocks must not cross the
+/// group's bitmap boundary (the sharded free path only ever frees a run known to
+/// live in one group — a single tree-node block, or one contiguous same-group
+/// extent segment).
+#[expect(clippy::too_many_arguments)]
+pub fn free_blocks_in_group(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    stats: &mut GroupStats,
+    group: GroupNumber,
+    rel_start: u32,
+    count: u32,
+    pctx: &PersistCtx,
+    reserved: &[u32],
+) -> Result<()> {
+    cx_checkpoint(cx)?;
+
+    if count == 0 {
+        return Ok(());
+    }
+
+    let seg_end = rel_start + count;
+
+    // Validate none of the blocks being freed are reserved metadata. `reserved`
+    // is sorted ascending, so one binary search for the first reserved block
+    // >= rel_start decides overlap for the whole run — identical to the
+    // `free_blocks_persist` segment check.
+    let rp = reserved.partition_point(|&r| r < rel_start);
+    if let Some(&r) = reserved.get(rp) {
+        if r < seg_end {
+            return Err(FfsError::Corruption {
+                block: geo.group_block_to_absolute(group, r).0,
+                detail: "attempt to free reserved metadata block".into(),
+            });
+        }
+    }
+
+    let bitmap_buf = dev.read_block(cx, stats.block_bitmap_block)?;
+    let mut bitmap = bitmap_buf.as_slice().to_vec();
+
+    // Double-free detection: the first FREE bit in the range is the first
+    // double-free (all bits must currently be allocated to be freed).
+    if let Some(bad) = bitmap_find_free_range(&bitmap, rel_start, seg_end) {
+        return Err(FfsError::Corruption {
+            block: geo.group_block_to_absolute(group, bad).0,
+            detail: "double-free: block already free in bitmap".into(),
+        });
+    }
+
+    // All bits were set (validated above), so clearing the whole contiguous
+    // range is exact; the range itself is the rollback undo (re-set it), so no
+    // per-bit undo Vec is needed.
+    bitmap_clear_range(&mut bitmap, rel_start, count);
+    let block_bitmap_override =
+        BitmapOverride::from_flipped_bit_range(&bitmap, rel_start, count, pctx.blocks_per_group);
+
+    dev.write_block(cx, stats.block_bitmap_block, &bitmap)?;
+    let previous_free_blocks = stats.free_blocks;
+    let previous_largest_free_run = stats.block_largest_free_run;
+    stats.free_blocks = previous_free_blocks.saturating_add(count);
+    // Freeing only GROWS the group's largest contiguous free run, so INVALIDATE
+    // (O(1), recompute-on-demand) — mirrors `free_blocks_persist`.
+    stats.invalidate_block_largest_free_run();
+
+    if let Err(error) = persist_group_desc_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        &stats,
+        Some(&block_bitmap_override),
+        None,
+    ) {
+        stats.free_blocks = previous_free_blocks;
+        stats.block_largest_free_run = previous_largest_free_run;
+        // Undo the range-clear: re-set the range (it was fully set before the
+        // clear, validated by the double-free scan above).
+        bitmap_set_range(&mut bitmap, rel_start, count);
+        restore_bitmap_after_group_desc_error(
+            cx,
+            dev,
+            stats.block_bitmap_block,
+            &bitmap,
+            "block bitmap free",
+            error,
+        )?;
+    }
+
+    Ok(())
+}
+
 // ── Batch block allocator ───────────────────────────────────────────────────
 
 /// Allocate `n` independent single blocks from the same goal group, amortizing
@@ -5332,6 +5446,115 @@ mod tests {
         let gdt_raw = dev.read_block(&cx, pctx.gdt_block).unwrap();
         let gd = Ext4GroupDesc::parse_from_bytes(gdt_raw.as_slice(), pctx.desc_size).unwrap();
         assert_eq!(gd.free_blocks_count, original_free);
+    }
+
+    /// Differential lock: [`free_blocks_in_group`] (the bd-bhh0i sharded
+    /// per-group free core) must produce byte-identical on-disk (bitmap + group
+    /// descriptor) AND in-memory (`free_blocks`, largest-run cache) state to the
+    /// single-lock [`free_blocks_persist`] for a free that lies within one group.
+    /// Covers csum/non-csum filesystems and single/multi-block runs so the
+    /// incremental bitmap-checksum path is exercised. This is the rigor that lets
+    /// `free_blocks_persist` stay UNTOUCHED (single-lock byte-identical) while the
+    /// sharded path composes the replica under a per-group lock.
+    #[test]
+    fn free_blocks_in_group_matches_free_blocks_persist_single_segment() {
+        // Pin the eager per-op GDT persist path so the on-disk GDT (including the
+        // incremental bitmap checksum) is written and compared for both impls.
+        set_gdt_persistence_deferred_for_test(Some(false));
+        let cx = test_cx();
+
+        let run_case = |has_metadata_csum: bool, count: u32| {
+            let mut geo = make_geometry();
+            let pctx = if has_metadata_csum {
+                geo.desc_size = 64;
+                PersistCtx {
+                    gdt_block: BlockNumber(50),
+                    desc_size: 64,
+                    has_metadata_csum: true,
+                    csum_seed: 0x1357_2468,
+                    uuid: [0x5A; 16],
+                    group_desc_checksum_kind:
+                        ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
+                    blocks_per_group: geo.blocks_per_group,
+                    inodes_per_group: geo.inodes_per_group,
+                }
+            } else {
+                make_persist_ctx()
+            };
+            let hint = AllocHint::default();
+
+            // Reference path: single-lock free_blocks_persist.
+            let dev_a = MemBlockDevice::new(4096);
+            let mut groups_a = make_groups(&geo);
+            seed_gdt_block(&dev_a, &pctx, &groups_a);
+            let alloc_a =
+                alloc_blocks_persist(&cx, &dev_a, &geo, &mut groups_a, count, &hint, &pctx).unwrap();
+
+            // Replica path: sharded free_blocks_in_group, seeded + allocated
+            // identically so the ONLY difference is the free implementation.
+            let dev_b = MemBlockDevice::new(4096);
+            let mut groups_b = make_groups(&geo);
+            seed_gdt_block(&dev_b, &pctx, &groups_b);
+            let alloc_b =
+                alloc_blocks_persist(&cx, &dev_b, &geo, &mut groups_b, count, &hint, &pctx).unwrap();
+            assert_eq!(alloc_a.start, alloc_b.start, "identical alloc precondition");
+            assert_eq!(alloc_a.count, alloc_b.count);
+
+            free_blocks_persist(
+                &cx, &dev_a, &geo, &mut groups_a, alloc_a.start, alloc_a.count, &pctx,
+            )
+            .unwrap();
+
+            let (group, rel_start) = geo.absolute_to_group_block(alloc_b.start);
+            let gidx = group.0 as usize;
+            let reserved = reserved_blocks_in_group(&geo, &groups_b, group);
+            free_blocks_in_group(
+                &cx,
+                &dev_b,
+                &geo,
+                &mut groups_b[gidx],
+                group,
+                rel_start,
+                alloc_b.count,
+                &pctx,
+                &reserved,
+            )
+            .unwrap();
+
+            // In-memory GroupStats identical for the affected group.
+            assert_eq!(
+                groups_a[gidx].free_blocks, groups_b[gidx].free_blocks,
+                "free_blocks (csum={has_metadata_csum}, count={count})"
+            );
+            assert_eq!(
+                groups_a[gidx].block_largest_free_run, groups_b[gidx].block_largest_free_run,
+                "largest_free_run cache (csum={has_metadata_csum}, count={count})"
+            );
+
+            // On-disk bitmap block + GDT block byte-identical.
+            let bmp_a = dev_a.read_block(&cx, groups_a[gidx].block_bitmap_block).unwrap();
+            let bmp_b = dev_b.read_block(&cx, groups_b[gidx].block_bitmap_block).unwrap();
+            assert_eq!(
+                bmp_a.as_slice(),
+                bmp_b.as_slice(),
+                "block bitmap bytes (csum={has_metadata_csum}, count={count})"
+            );
+            let gdt_a = dev_a.read_block(&cx, pctx.gdt_block).unwrap();
+            let gdt_b = dev_b.read_block(&cx, pctx.gdt_block).unwrap();
+            assert_eq!(
+                gdt_a.as_slice(),
+                gdt_b.as_slice(),
+                "GDT block bytes (csum={has_metadata_csum}, count={count})"
+            );
+        };
+
+        for &csum in &[false, true] {
+            for &count in &[1u32, 3, 8] {
+                run_case(csum, count);
+            }
+        }
+
+        set_gdt_persistence_deferred_for_test(None);
     }
 
     #[test]
