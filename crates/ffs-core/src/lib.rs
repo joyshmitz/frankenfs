@@ -19042,10 +19042,15 @@ impl OpenFs {
                             return Ok(());
                         }
                     }
+                    // bd-bhh0i: rebuild is now backend-agnostic; wrap in a
+                    // byte-identical SingleLock backend (this is a return site).
+                    let mut backend = SingleLockDirAlloc {
+                        alloc: &mut *alloc,
+                    };
                     return self.ext4_rebuild_htree_dir(
                         cx,
                         dev,
-                        alloc,
+                        &mut backend,
                         parent,
                         parent_inode,
                         &extents,
@@ -19071,10 +19076,15 @@ impl OpenFs {
                 .ext4_superblock()
                 .is_some_and(|sb| sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX));
             if has_dir_index {
+                // bd-bhh0i: rebuild is now backend-agnostic; wrap in a
+                // byte-identical SingleLock backend (this is a return site).
+                let mut backend = SingleLockDirAlloc {
+                    alloc: &mut *alloc,
+                };
                 return self.ext4_rebuild_htree_dir(
                     cx,
                     dev,
-                    alloc,
+                    &mut backend,
                     parent,
                     parent_inode,
                     &extents,
@@ -19757,7 +19767,7 @@ impl OpenFs {
         &self,
         cx: &Cx,
         dev: &dyn BlockDevice,
-        alloc: &mut Ext4AllocState,
+        backend: &mut dyn DirAllocBackend,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
         extents: &[Ext4Extent],
@@ -19768,8 +19778,12 @@ impl OpenFs {
         tstamp_secs: u64,
         tstamp_nanos: u32,
     ) -> Result<(), FfsError> {
-        let block_size_u64 = u64::from(alloc.geo.block_size);
-        let block_size = usize::try_from(alloc.geo.block_size)
+        // bd-bhh0i: alloc access via the injected backend; `geo` is an owned
+        // snapshot so it doesn't borrow the backend across its &mut alloc/truncate/
+        // write calls.
+        let geo = backend.dir_geo();
+        let block_size_u64 = u64::from(geo.block_size);
+        let block_size = usize::try_from(geo.block_size)
             .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
         let parent_ino_u32 = u32::try_from(parent.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
@@ -19873,7 +19887,7 @@ impl OpenFs {
                 continue;
             };
             let buf = dev.read_block(cx, BlockNumber(phys))?;
-            let (entries, _) = ffs_ondisk::parse_dir_block(buf.as_slice(), alloc.geo.block_size)
+            let (entries, _) = ffs_ondisk::parse_dir_block(buf.as_slice(), geo.block_size)
                 .map_err(|e| parse_to_ffs_error(&e))?;
             for e in entries {
                 if e.inode == 0 || e.name.is_empty() || e.name == b"." || e.name == b".." {
@@ -19941,7 +19955,7 @@ impl OpenFs {
         let sectors_per_block = if parent_upd.is_huge_file() {
             1
         } else {
-            alloc.geo.block_size / EXT4_SECTOR_SIZE
+            geo.block_size / EXT4_SECTOR_SIZE
         };
         // Snapshot extent-tree metadata blocks before the rebuild remaps the
         // directory: the per-logical-block inserts below grow the tree and the
@@ -19956,59 +19970,34 @@ impl OpenFs {
             if let Some(phys) = resolve(logical) {
                 dev.write_block(cx, BlockNumber(phys), blk)?;
             } else {
-                let Ext4AllocState {
-                    geo,
-                    groups,
-                    persist_ctx,
-                } = &mut *alloc;
-                let ba = ffs_alloc::alloc_blocks_persist(
-                    cx,
-                    dev,
-                    geo,
-                    groups,
-                    1,
-                    &AllocHint::default(),
-                    persist_ctx,
-                )?;
+                let ba = backend.dir_alloc_blocks(cx, dev, 1, &AllocHint::default())?;
                 dev.write_block(cx, ba.start, blk)?;
                 let extent = Ext4Extent {
                     logical_block: logical,
                     raw_len: 1,
                     physical_start: ba.start.0,
                 };
-                let mut tree_alloc = ffs_extent::GroupBlockAllocator {
+                backend.dir_insert_extent(
                     cx,
                     dev,
-                    geo,
-                    groups,
-                    hint: AllocHint::default(),
-                    pctx: persist_ctx,
-                    ino: parent_ino_u32,
+                    &mut root_bytes,
+                    extent,
+                    parent_ino_u32,
                     generation,
-                };
-                ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
+                    AllocHint::default(),
+                )?;
                 allocated += 1;
             }
         }
 
         let freed: u64 = if m_blocks < n_blocks {
-            let Ext4AllocState {
-                geo,
-                groups,
-                persist_ctx,
-            } = &mut *alloc;
-            ffs_extent::truncate_extents(
+            backend.dir_truncate_extents(
                 cx,
                 dev,
                 &mut root_bytes,
-                geo,
-                groups,
                 m_blocks,
-                persist_ctx,
-                ffs_extent::ExtentOwner {
-                    ino: parent_ino_u32,
-                    generation,
-                },
+                parent_ino_u32,
+                generation,
             )?
         } else {
             0
@@ -20047,15 +20036,7 @@ impl OpenFs {
                 parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
             )?;
         }
-        ffs_inode::write_inode(
-            cx,
-            dev,
-            &alloc.geo,
-            &alloc.groups,
-            parent,
-            &parent_upd,
-            csum_seed,
-        )?;
+        backend.dir_write_inode(cx, dev, parent, &parent_upd, csum_seed)?;
         self.extent_cache.invalidate_all();
         self.invalidate_all_ext4_write_extent_snapshots();
         Ok(())
