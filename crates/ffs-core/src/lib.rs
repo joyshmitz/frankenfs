@@ -19266,10 +19266,15 @@ impl OpenFs {
         ) {
             Ok(s) => s,
             Err(ffs_ondisk::HtreeSplitFallback::MultiLevelIndex) => {
+                // bd-bhh0i: the dx-node split is now backend-agnostic; the
+                // single-lock caller passes a byte-identical SingleLock backend.
+                let mut backend = SingleLockDirAlloc {
+                    alloc: &mut *alloc,
+                };
                 return self.ext4_split_htree_dx_node_leaf_and_add(
                     cx,
                     dev,
-                    alloc,
+                    &mut backend,
                     parent,
                     parent_inode,
                     extents,
@@ -19453,7 +19458,7 @@ impl OpenFs {
         &self,
         cx: &Cx,
         dev: &dyn BlockDevice,
-        alloc: &mut Ext4AllocState,
+        backend: &mut dyn DirAllocBackend,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
         extents: &[Ext4Extent],
@@ -19468,7 +19473,11 @@ impl OpenFs {
         tstamp_secs: u64,
         tstamp_nanos: u32,
     ) -> Result<Option<()>, FfsError> {
-        let block_size = usize::try_from(alloc.geo.block_size)
+        // bd-bhh0i: alloc access goes through the injected backend (single-lock =
+        // byte-identical; sharded = lock-free). `geo` is an owned snapshot so it
+        // does not borrow the backend across its &mut alloc/insert/write calls.
+        let geo = backend.dir_geo();
+        let block_size = usize::try_from(geo.block_size)
             .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
         let parent_ino_u32 = u32::try_from(parent.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
@@ -19572,7 +19581,7 @@ impl OpenFs {
         );
 
         let hint = self.numa_allocation_hint(
-            &alloc.geo,
+            &geo,
             AllocHint {
                 goal_block: extents.last().map(Self::extent_end_hint),
                 ..AllocHint::default()
@@ -19580,15 +19589,7 @@ impl OpenFs {
             "ext4_htree_dx_node_leaf_split",
             Some(parent),
         );
-        let new_alloc = ffs_alloc::alloc_blocks_persist(
-            cx,
-            dev,
-            &alloc.geo,
-            &mut alloc.groups,
-            1,
-            &hint,
-            &alloc.persist_ctx,
-        )?;
+        let new_alloc = backend.dir_alloc_blocks(cx, dev, 1, &hint)?;
 
         dev.write_block(cx, target_phys, &old_leaf)?;
         dev.write_block(cx, new_alloc.start, &new_leaf)?;
@@ -19604,10 +19605,10 @@ impl OpenFs {
         let sectors_per_block = if parent_upd.is_huge_file() {
             1
         } else {
-            alloc.geo.block_size / EXT4_SECTOR_SIZE
+            geo.block_size / EXT4_SECTOR_SIZE
         };
         let tree_hint = self.numa_allocation_hint(
-            &alloc.geo,
+            &geo,
             AllocHint {
                 goal_block: Some(new_alloc.start),
                 ..AllocHint::default()
@@ -19618,19 +19619,15 @@ impl OpenFs {
         let parent_extent_ns = extent_cache_namespace(&parent_upd);
         let dir_meta_before =
             Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
-        {
-            let mut tree_alloc = ffs_extent::GroupBlockAllocator {
-                cx,
-                dev,
-                geo: &alloc.geo,
-                groups: &mut alloc.groups,
-                hint: tree_hint,
-                pctx: &alloc.persist_ctx,
-                ino: parent_ino_u32,
-                generation,
-            };
-            ffs_btree::insert(cx, dev, &mut root_bytes, extent, &mut tree_alloc)?;
-        }
+        backend.dir_insert_extent(
+            cx,
+            dev,
+            &mut root_bytes,
+            extent,
+            parent_ino_u32,
+            generation,
+            tree_hint,
+        )?;
         let dir_meta_after =
             Self::ext4_count_extent_tree_meta_blocks_via_dev(cx, dev, &root_bytes)?;
         self.invalidate_ext4_write_extent_snapshot(&parent_upd);
@@ -19641,7 +19638,7 @@ impl OpenFs {
             u64::from(u32::MAX - new_leaf_logical),
         );
 
-        let block_size_u64 = u64::from(alloc.geo.block_size);
+        let block_size_u64 = u64::from(geo.block_size);
         parent_upd.size =
             parent_upd
                 .size
@@ -19670,15 +19667,7 @@ impl OpenFs {
             )?;
         }
         ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-        ffs_inode::write_inode(
-            cx,
-            dev,
-            &alloc.geo,
-            &alloc.groups,
-            parent,
-            &parent_upd,
-            csum_seed,
-        )?;
+        backend.dir_write_inode(cx, dev, parent, &parent_upd, csum_seed)?;
 
         Ok(Some(()))
     }
