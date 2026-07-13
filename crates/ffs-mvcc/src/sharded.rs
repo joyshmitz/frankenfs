@@ -465,6 +465,12 @@ pub struct ShardedMvccStore {
     /// must be acquired last (or alone). Never acquire `shards` or
     /// `active_snapshots` while holding `contention_metrics`.
     contention_metrics: RwLock<ContentionMetrics>,
+    /// Bench/test-only: force per-commit contention-metrics recording even under
+    /// a fixed policy, so a same-binary A/B can reproduce the pre-gate behavior
+    /// (the global `contention_metrics.write()` on every commit). Production
+    /// leaves this `false` — fixed policies never read the metrics, so recording
+    /// them would just serialize otherwise-disjoint parallel commits.
+    force_metrics_record: AtomicBool,
 }
 
 impl ShardedMvccStore {
@@ -517,6 +523,7 @@ impl ShardedMvccStore {
             conflict_policy: RwLock::new(ConflictPolicy::default()),
             adaptive_config: AdaptivePolicyConfig::default(),
             contention_metrics: RwLock::new(ContentionMetrics::default()),
+            force_metrics_record: AtomicBool::new(false),
         }
     }
 
@@ -555,6 +562,39 @@ impl ShardedMvccStore {
                 .select_policy(&self.adaptive_config),
             other => other,
         }
+    }
+
+    /// The effective policy for the next commit AND whether its contention
+    /// metrics must be maintained. Only [`ConflictPolicy::Adaptive`] consumes
+    /// the metrics (`effective_policy` reads them to select a strategy; no
+    /// production caller reads them otherwise), so under a fixed policy the
+    /// per-commit `contention_metrics.write()` — a GLOBAL lock that serializes
+    /// every otherwise-disjoint parallel commit across all shards — is pure
+    /// unread telemetry and is skipped. One `conflict_policy` read answers both.
+    fn commit_policy(&self) -> (ConflictPolicy, bool) {
+        let configured = *self.conflict_policy.read();
+        match configured {
+            ConflictPolicy::Adaptive => (
+                self.contention_metrics
+                    .read()
+                    .select_policy(&self.adaptive_config),
+                true,
+            ),
+            other => (
+                other,
+                self.force_metrics_record
+                    .load(std::sync::atomic::Ordering::Relaxed),
+            ),
+        }
+    }
+
+    /// Bench/test hook: force contention-metrics recording under a fixed policy,
+    /// reproducing the pre-gate per-commit `contention_metrics.write()` so a
+    /// same-binary A/B can measure the eliminated global-lock serialization.
+    #[doc(hidden)]
+    pub fn set_force_metrics_record(&self, on: bool) {
+        self.force_metrics_record
+            .store(on, std::sync::atomic::Ordering::Relaxed);
     }
 
     /// Map a block number to its shard index.
@@ -688,6 +728,7 @@ impl ShardedMvccStore {
         txn: &Transaction,
         shard_guards: &[(usize, ShardWriteGuard<'_>)],
         effective: ConflictPolicy,
+        record_metrics: bool,
         merge_log_event: &'static str,
     ) -> Result<(), CommitError> {
         let mut had_conflict = false;
@@ -710,10 +751,12 @@ impl ShardedMvccStore {
 
                 // Under Strict policy, any conflict is an immediate abort.
                 if effective == ConflictPolicy::Strict {
-                    let mut cm = self.contention_metrics.write();
-                    cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
-                    cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
-                    drop(cm);
+                    if record_metrics {
+                        let mut cm = self.contention_metrics.write();
+                        cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
+                        cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+                        drop(cm);
+                    }
                     return Err(CommitError::Conflict {
                         block,
                         snapshot: txn.snapshot().high,
@@ -734,10 +777,12 @@ impl ShardedMvccStore {
                         "{merge_log_event}"
                     );
                 } else {
-                    let mut cm = self.contention_metrics.write();
-                    cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
-                    cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
-                    drop(cm);
+                    if record_metrics {
+                        let mut cm = self.contention_metrics.write();
+                        cm.record_commit(self.adaptive_config.ema_alpha, true, false, true);
+                        cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+                        drop(cm);
+                    }
                     return Err(CommitError::Conflict {
                         block,
                         snapshot: txn.snapshot().high,
@@ -747,16 +792,22 @@ impl ShardedMvccStore {
             }
         }
 
-        // Record successful preflight (no abort).
-        let mut cm = self.contention_metrics.write();
-        cm.record_commit(
-            self.adaptive_config.ema_alpha,
-            had_conflict,
-            merge_succeeded,
-            false,
-        );
-        cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
-        drop(cm);
+        // Record successful preflight (no abort). Under a fixed conflict policy
+        // nothing reads these metrics (only Adaptive's `effective_policy` does),
+        // so skip the global `contention_metrics` write lock entirely — it would
+        // otherwise serialize every parallel commit across all shards on the hot
+        // path even though its output (`last_selected`) is never consumed.
+        if record_metrics {
+            let mut cm = self.contention_metrics.write();
+            cm.record_commit(
+                self.adaptive_config.ema_alpha,
+                had_conflict,
+                merge_succeeded,
+                false,
+            );
+            cm.last_selected = Some(cm.select_policy(&self.adaptive_config));
+            drop(cm);
+        }
         Ok(())
     }
 
@@ -1120,7 +1171,7 @@ impl ShardedMvccStore {
         }
 
         let shard_indices = self.involved_shards(&txn);
-        let effective = self.effective_policy();
+        let (effective, record_metrics) = self.commit_policy();
         let shard_wait_started = probe.start();
         let mut shard_guards = self.lock_shards(&shard_indices);
         probe.finish(CommitLockPhase::ShardWait, shard_wait_started);
@@ -1130,6 +1181,7 @@ impl ShardedMvccStore {
             &txn,
             &shard_guards,
             effective,
+            record_metrics,
             "sharded_fcw_conflict_merged",
         ) {
             drop(shard_guards);
@@ -1202,13 +1254,14 @@ impl ShardedMvccStore {
         }
 
         let shard_indices = self.ssi_shards_for_txn(&txn);
-        let effective = self.effective_policy();
+        let (effective, record_metrics) = self.commit_policy();
         let mut shard_guards = self.lock_shards(&shard_indices);
 
         if let Err(error) = self.preflight_fcw_locked(
             &txn,
             &shard_guards,
             effective,
+            record_metrics,
             "sharded_ssi_fcw_conflict_merged",
         ) {
             return Err((error, txn));
@@ -1943,6 +1996,33 @@ mod tests {
         let metrics = store.contention_metrics();
         assert_eq!(metrics.last_selected, Some(ConflictPolicy::Strict));
         assert_eq!(store.effective_policy(), ConflictPolicy::Strict);
+    }
+
+    #[test]
+    fn fixed_policy_skips_contention_metrics_but_force_records() {
+        // Default (SafeMerge) fixed policy: the commit succeeds but the global
+        // contention_metrics write lock is skipped, so counters stay at default.
+        let store = make_store(4);
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(1), vec![0xAA; 8]);
+        store.commit(txn).expect("commit");
+        assert_eq!(
+            store.contention_metrics().total_commits,
+            0,
+            "fixed policy must not record per-commit contention metrics"
+        );
+
+        // The bench/test force hook reproduces the pre-gate per-commit recording.
+        let store = make_store(4);
+        store.set_force_metrics_record(true);
+        let mut txn = store.begin();
+        txn.stage_write(BlockNumber(1), vec![0xAA; 8]);
+        store.commit(txn).expect("commit");
+        assert_eq!(
+            store.contention_metrics().total_commits,
+            1,
+            "force hook must reproduce per-commit recording"
+        );
     }
 
     #[test]

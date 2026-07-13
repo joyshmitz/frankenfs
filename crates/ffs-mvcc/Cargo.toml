@@ -80,3 +80,7 @@ harness = false
 [[bench]]
 name = "merge_range_overlay"
 harness = false
+
+[[bench]]
+name = "commit_metrics_lock"
+harness = false
