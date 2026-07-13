@@ -6453,3 +6453,30 @@ contention (remote, quantifies the win); (2) conformance 100/0/2 (correctness); 
 `ffs-cli rand-read --parallel` single-file WIN + multi-file NON-regression (fleet/local A/B,
 deferred). NOT landed this turn: lib.rs is reserved by the active xattr peer, and the fleet
 slot (frankenfs per-project=1) is swarm-held. Whoever holds lib.rs next can implement verbatim.
+
+### 2026-07-12 (cont.) — bd-eflng primitive A/B MEASURED: lock-free hot-inode read = 3.17x the sharded-Mutex under single-file contention (validates the lever mechanism)
+
+Ran the isolating micro-bench (`crates/ffs-core/benches/hot_inode_lockfree.rs`) on the
+fleet, 16 threads (the shipped `ext4_read_pool` width), fresh-target release-perf,
+Criterion 100 samples:
+
+  HOT KEY (single-file random read — the bd-eflng target):
+    sharded_mutex_get  20.798 ms   (parking_lot::Mutex-per-shard, the ShardedCache stand-in)
+    arc_swap_load       6.567 ms   (lock-free single-slot RCU load)
+    => arc_swap 3.17x FASTER (20.798/6.567). The lock-free hot-inode read removes the
+       shard-Mutex serialization the bd-eflng profile blamed (WordLock lock_slow on the
+       one hot inode-table block) — the design's mechanism is confirmed quantitatively.
+
+  DISTINCT KEYS (multi-file — the single-slot design's risk, in ISOLATION):
+    sharded_mutex_get  17.062 ms
+    arc_swap_thrash    29.124 ms   (every read misses another thread's key -> store)
+    => arc_swap single-slot 1.71x SLOWER (29.124/17.062). Quantifies the multi-file
+       store-thrash. This is an UPPER BOUND on the fs-path cost: the real read amortizes a
+       ~ns arc_swap store against the ~µs block read it replaces, and multi-file access
+       still falls through to the block cache. So the single-entry-for-the-hot-inode design
+       (as recorded in dded2ffb) is correct: a big win on the hot single-file inode, a cheap
+       bounded store elsewhere.
+
+VERDICT: primitive evidence SUPPORTS the lock-free hot-inode read (design dded2ffb) — a
+3.17x contention win on bd-eflng's single-file random-read target. The read_inode_with_scope
+cache lands when lib.rs frees (peer-reserved); this bench is its quantified justification.

@@ -42,14 +42,20 @@ zstd = { workspace = true }
 lzo = "0.1"
 
 [dev-dependencies]
+arc-swap = { workspace = true }
 criterion = { workspace = true }
 libc = { workspace = true }
+parking_lot = { workspace = true }
 loom = { workspace = true }
 proptest = { workspace = true }
 serde_json = { workspace = true }
 sha2 = { workspace = true }
 tempfile = { workspace = true }
 tracing-subscriber = { workspace = true, features = ["env-filter", "json"] }
+
+[[bench]]
+name = "hot_inode_lockfree"
+harness = false
 
 [[bench]]
 name = "extent_resolve"
