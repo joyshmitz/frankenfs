@@ -17553,6 +17553,35 @@ impl OpenFs {
         Ok((ino, inode))
     }
 
+    /// Write an inode via the sharded (no-write-lock) path (bd-bhh0i cutover
+    /// slice 7a) — the lock-free equivalent of `ffs_inode::write_inode`, which
+    /// needs `&groups` only to locate the slot. Uses the lock-free locator
+    /// (slice 4) + `write_inode_at`. The sharded dir-entry insert uses this for
+    /// the parent-inode updates (mtime/ctime, link count) that
+    /// `ext4_try_insert_existing` currently does through `write_inode(&alloc.geo,
+    /// &alloc.groups, ..)`.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_write_inode(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError> {
+        let sb = self.ext4_superblock().ok_or_else(|| {
+            FfsError::Format("sharded write inode: not an ext4 filesystem".into())
+        })?;
+        let inode_size = usize::from(FsGeometry::from_superblock(sb).inode_size);
+        let loc = self
+            .ext4_sharded_locate_inode(ino)
+            .ok_or_else(|| FfsError::Corruption {
+                block: 0,
+                detail: format!("sharded write: inode {} out of range", ino.0),
+            })?;
+        ffs_inode::write_inode_at(cx, dev, loc, inode_size, ino, inode, csum_seed)
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61850,6 +61879,38 @@ mod tests {
         // but read_inode's inode-table-block cache coherence across a bare write
         // is out of scope for the composition test.)
         let _ = ino;
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_write_inode_writes_existing_inode_bd_bhh0i() {
+        // The sharded inode-write locates + writes an existing inode without the
+        // alloc lock and without allocating (total_free unchanged).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let csum_seed = fs
+            .ext4_superblock()
+            .expect("ext4 superblock present")
+            .csum_seed();
+        let root = fs.read_inode(&cx, InodeNumber(2)).expect("read root inode");
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        fs.ext4_sharded_write_inode(&cx, &dev, InodeNumber(2), &root, csum_seed)
+            .expect("sharded write of root inode");
+        let total_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(total_before, total_after, "an inode write must not allocate");
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
