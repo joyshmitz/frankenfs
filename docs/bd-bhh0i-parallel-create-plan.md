@@ -895,13 +895,23 @@ AND `free_block`. The sharded `alloc_block` already routes through
 supplies it.
 
 **NEXT slices (toward the sharded tree `BlockAllocator` that unblocks growth):**
-1. `PerGroupAlloc::free_block` (ffs-core) — compose `free_blocks_in_group` under the
-   target group's `Mutex` (compute group+rel from the abs `BlockNumber`, read the
-   locked group's `reserved_cache`), mirroring how `PerGroupAlloc::alloc_blocks`
-   composes the alloc core. Then `OpenFs::ext4_sharded_free_blocks` wrapper
-   (lock-free geo+pctx), mirroring `ext4_sharded_alloc_blocks`.
-2. `ShardedTreeBlockAllocator` impl `ffs_btree::BlockAllocator` over `&OpenFs`+geo:
-   `alloc_block`→`ext4_sharded_alloc_blocks`(+hint update), `free_block`→
-   `ext4_sharded_free_blocks`, `finalize_node`→CRC stamp (copy `GroupBlockAllocator`).
-   This is the extent-tree-meta allocator the four growth sites need so the
-   `DirAllocBackend`-threaded growth logic (slice 8b seam) can serve the sharded path.
+1. ✅ DONE (`54e8617b`) — `PerGroupAlloc::free_blocks` + `OpenFs::ext4_sharded_free_blocks`
+   composers. `free_blocks` computes group+rel from the abs `BlockNumber`, locks
+   only that group, reads its `reserved_cache`, and delegates to
+   `free_blocks_in_group` (mirrors `alloc_blocks`); a cross-group run is rejected
+   (defensive). Wrapper derives geo+pctx lock-free (mirrors `ext4_sharded_alloc_blocks`).
+   Round-trip integration test (`ext4_sharded_free_blocks_wrapper_round_trips_bd_bhh0i`,
+   real mkfs) alloc-3→free-3→re-alloc-a-freed-block; feature suite 13/13 remote.
+   Feature-gated → default byte-identical.
+2. **NEXT** — `ShardedTreeBlockAllocator` impl `ffs_btree::BlockAllocator` over
+   `&OpenFs`+geo: `alloc_block`→`ext4_sharded_alloc_blocks`(+hint update),
+   `free_block`→`ext4_sharded_free_blocks`, `finalize_node`→CRC stamp (copy
+   `GroupBlockAllocator::finalize_node`, keyed on csum_seed+ino+generation). The
+   extent-tree-meta allocator the four growth sites need. NOTE the borrow snag that
+   makes growth "all-or-nothing": each growth helper currently holds `&mut alloc`
+   for BOTH `alloc_blocks_persist` AND the `GroupBlockAllocator{ groups: &mut
+   alloc.groups }` inside `ffs_btree::insert` — this tree allocator is what lets
+   the `insert` call go through the sharded structure so the whole helper can drop
+   the single-lock `&mut alloc`. Unit-test it standalone (impl the 3 trait methods,
+   assert alloc/free round-trip + a metadata_csum finalize_node stamp) before
+   threading it through the `DirAllocBackend` growth path.
