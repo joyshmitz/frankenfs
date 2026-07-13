@@ -6480,3 +6480,28 @@ Criterion 100 samples:
 VERDICT: primitive evidence SUPPORTS the lock-free hot-inode read (design dded2ffb) — a
 3.17x contention win on bd-eflng's single-file random-read target. The read_inode_with_scope
 cache lands when lib.rs frees (peer-reserved); this bench is its quantified justification.
+
+### 2026-07-12 (cont.) — CORRECTION: bd-eflng lock-free hot-inode is ALREADY LANDED by the swarm (426979e3, 5.6x); my design was redundant, my bench CORROBORATES it
+
+Grabbed the lib.rs reservation the moment it freed to implement the recorded lock-free
+hot-inode design (dded2ffb) — and found it ALREADY IMPLEMENTED. Correcting my own
+"proposed/blocked" framing (dded2ffb, 7bc099c7) for ledger integrity:
+
+- `426979e3 perf(ext4): lock-free hot-inode slot — fixes parallel read negative-scaling,
+  64t ~5.6x` is EXACTLY the bd-eflng lock-free hot-inode lever, LANDED. `OpenFs` holds
+  `ext4_hot_inode: arc_swap::ArcSwapOption<(u64, Arc<Ext4Inode>)>` (lib.rs:1119); the
+  read path (lib.rs:31248) serves the hot single-file inode from it RO-gated, avoiding the
+  `ext4_inode_table_block_cache` shard-Mutex — the mechanism I designed. It is MORE refined
+  than dded2ffb: it BORROWS out of the arc_swap Guard instead of Arc-cloning (a further
+  ~6.6% of warm random-read) and never deep-clones `Ext4Inode`'s `xattr_ibody`.
+- `92530219 perf(ext4): lock-free hot-extent slot — removes per-block ExtentCache RwLock,
+  64t ~1.2-1.35x` is the sibling lock-free hot-EXTENT slot (the other bd-eflng residual).
+
+I was blocked on the lib.rs reservation and did not see the swarm implement it in parallel.
+So: bd-eflng lock-free hot-inode = DONE (not mine, 5.6x); dded2ffb design = redundant;
+the `hot_inode_lockfree` bench (7bc099c7, arc_swap 3.17x the sharded-Mutex at 16t) is now
+CORROBORATING evidence — the isolated 3.17x primitive win is consistent with and explains
+the landed end-to-end 5.6x (shard-Mutex elimination on the hot inode). It stands as a valid
+primitive characterization of a shipped lever, not justification for a proposed one. lib.rs
+reservation released. No new lever landed this turn beyond that already-pushed bench; the
+bd-eflng residual is closed by the swarm.
