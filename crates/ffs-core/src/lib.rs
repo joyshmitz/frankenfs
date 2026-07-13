@@ -17693,7 +17693,28 @@ impl OpenFs {
         let Ok(alloc_mutex) = self.require_alloc_state() else {
             return Ok(()); // read-only fs — nothing to sync
         };
-        let (total_free_blocks, total_free_inodes) = {
+        // bd-bhh0i: when the sharded create path is active the single-lock
+        // `alloc.groups` is STALE (sharded creates debit the per-group `PerGroupAlloc`
+        // + on-disk GDs, not this array), so fold the superblock free totals from the
+        // sharded records instead — EXACT here because `ext4_sync_superblock_free_totals`
+        // runs at a quiesced durability boundary. Without this the persisted superblock
+        // free counts diverge from the (sharded-updated) group descriptors → e2fsck
+        // "free count wrong" (default-off/toggle-off → the unchanged single-lock fold).
+        #[cfg(feature = "bhh0i_sharded_alloc")]
+        let sharded_totals: Option<(u64, u64)> = self.bhh0i_sharded_ops_active().then(|| {
+            let t = self
+                .ext4_sharded_alloc
+                .as_ref()
+                .expect("sharded active implies present")
+                .total_free();
+            (t.blocks, t.inodes)
+        });
+        #[cfg(not(feature = "bhh0i_sharded_alloc"))]
+        let sharded_totals: Option<(u64, u64)> = None;
+
+        let (total_free_blocks, total_free_inodes) = if let Some(totals) = sharded_totals {
+            totals
+        } else {
             let alloc = alloc_mutex.read();
             // Sum both free totals in ONE pass over the group array. Two separate
             // `.sum()` passes reload every group's (large) struct a second time;
@@ -62787,6 +62808,56 @@ mod tests {
             sharded_inodes_after,
             sharded_inodes_before - 2,
             "toggle must route BOTH create + mkdir through the sharded allocator"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn sync_superblock_free_totals_folds_from_sharded_when_active_bd_bhh0i() {
+        // e2fsck-critical: after sharded creates, the PERSISTED superblock free-inode
+        // count must fold from the sharded total_free (the single-lock groups are
+        // stale), or it diverges from the sharded-updated group descriptors.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        fs.set_bhh0i_sharded_ops(true);
+
+        let mut scope = RequestScope::empty();
+        for i in 0..3u32 {
+            let name = format!("f{i}");
+            fs.ext4_create(&cx, &mut scope, root, name.as_bytes(), 0o644, 0, 0)
+                .expect("routed sharded create");
+        }
+        let sharded_free_inodes = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+
+        fs.ext4_sync_superblock_free_totals(&cx)
+            .expect("superblock free-total sync");
+
+        // Re-read the on-disk superblock free-inode count (offset 0x10 within the sb).
+        let (sb_block, sb_off) = fs.ext4_superblock_location();
+        let dev = fs.direct_block_device_adapter();
+        let block = dev
+            .read_block(&cx, sb_block)
+            .expect("read superblock")
+            .into_inner();
+        let on_disk_free_inodes = u32::from_le_bytes([
+            block[sb_off + 0x10],
+            block[sb_off + 0x11],
+            block[sb_off + 0x12],
+            block[sb_off + 0x13],
+        ]);
+
+        assert_eq!(
+            u64::from(on_disk_free_inodes),
+            sharded_free_inodes,
+            "synced superblock free-inode count must fold from the sharded total_free"
         );
     }
 
