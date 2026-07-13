@@ -477,6 +477,12 @@ where
     }
 }
 
+fn first_index_for_range(indexes: &[Ext4ExtentIndex], start: u64) -> usize {
+    indexes
+        .partition_point(|idx| u64::from(idx.logical_block) <= start)
+        .saturating_sub(1)
+}
+
 fn walk_index_range<F>(
     cx: &Cx,
     dev: &dyn BlockDevice,
@@ -496,8 +502,13 @@ where
         });
     }
 
+    // `parse_index_entries` guarantees strictly increasing separators. The
+    // child that can contain `start` is therefore the last separator at or
+    // before it; no earlier child can overlap the requested range.
+    let first = first_index_for_range(indexes, start);
     let mut count = 0;
-    for (pos, idx) in indexes.iter().enumerate() {
+    for (offset, idx) in indexes[first..].iter().enumerate() {
+        let pos = first + offset;
         let child_start = u64::from(idx.logical_block);
         let child_end = indexes
             .get(pos + 1)
@@ -2142,6 +2153,41 @@ mod tests {
 
         assert_eq!(count, 3);
         assert_eq!(visited, [0, 10, 20]);
+    }
+
+    #[test]
+    fn index_range_prefix_bound_preserves_child_boundaries() {
+        let indexes = [
+            Ext4ExtentIndex {
+                logical_block: 0,
+                leaf_block: 100,
+            },
+            Ext4ExtentIndex {
+                logical_block: 10,
+                leaf_block: 200,
+            },
+            Ext4ExtentIndex {
+                logical_block: 20,
+                leaf_block: 300,
+            },
+            Ext4ExtentIndex {
+                logical_block: 30,
+                leaf_block: 400,
+            },
+        ];
+
+        assert_eq!(first_index_for_range(&indexes, 0), 0);
+        assert_eq!(first_index_for_range(&indexes, 9), 0);
+        assert_eq!(first_index_for_range(&indexes, 10), 1);
+        assert_eq!(first_index_for_range(&indexes, 19), 1);
+        assert_eq!(first_index_for_range(&indexes, 20), 2);
+        assert_eq!(first_index_for_range(&indexes, u64::from(u32::MAX)), 3);
+
+        let indexes_after_start = [Ext4ExtentIndex {
+            logical_block: 10,
+            leaf_block: 100,
+        }];
+        assert_eq!(first_index_for_range(&indexes_after_start, 0), 0);
     }
 
     #[test]

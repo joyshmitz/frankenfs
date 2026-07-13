@@ -13,13 +13,16 @@
 //! This bench isolates the removed work over a full 4K ext4 extent leaf
 //! (340 entries): `old_checked_zero_scan` models the old extra validation pass,
 //! and `trusted_validated_no_rescan` models the new private helper.
+//! It also isolates the analogous validated index-node range-prefix bound over
+//! 340 child separators.
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use ffs_btree::SearchResult;
-use ffs_ondisk::Ext4Extent;
+use ffs_ondisk::{Ext4Extent, Ext4ExtentIndex};
 use std::hint::black_box;
 
 const LEAF_ENTRIES_4K: u32 = 340;
+const INDEX_STRIDE: u32 = 1024;
 const PROBE_COUNT: usize = 2048;
 
 fn actual_len(raw_len: u16) -> u16 {
@@ -37,6 +40,15 @@ fn build_full_leaf() -> Vec<Ext4Extent> {
             logical_block: i * 2,
             raw_len: 1,
             physical_start: 1_000_000 + u64::from(i),
+        })
+        .collect()
+}
+
+fn build_full_index() -> Vec<Ext4ExtentIndex> {
+    (0..LEAF_ENTRIES_4K)
+        .map(|i| Ext4ExtentIndex {
+            logical_block: i * INDEX_STRIDE,
+            leaf_block: 2_000_000 + u64::from(i),
         })
         .collect()
 }
@@ -130,6 +142,54 @@ fn visit_range_partitioned(extents: &[Ext4Extent], start: u64, end: u64) -> (usi
         digest = digest
             .wrapping_mul(0x100_0000_01b3)
             .wrapping_add(extent.physical_start);
+    }
+    (count, digest)
+}
+
+fn index_range_linear(indexes: &[Ext4ExtentIndex], start: u64, end: u64) -> (usize, u64) {
+    let mut count = 0;
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for (pos, index) in indexes.iter().enumerate() {
+        let child_start = u64::from(index.logical_block);
+        let child_end = indexes
+            .get(pos + 1)
+            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+        count += 1;
+        digest = digest
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(index.leaf_block);
+    }
+    (count, digest)
+}
+
+fn index_range_partitioned(indexes: &[Ext4ExtentIndex], start: u64, end: u64) -> (usize, u64) {
+    let first = indexes
+        .partition_point(|index| u64::from(index.logical_block) <= start)
+        .saturating_sub(1);
+    let mut count = 0;
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    for (offset, index) in indexes[first..].iter().enumerate() {
+        let pos = first + offset;
+        let child_start = u64::from(index.logical_block);
+        let child_end = indexes
+            .get(pos + 1)
+            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+        count += 1;
+        digest = digest
+            .wrapping_mul(0x100_0000_01b3)
+            .wrapping_add(index.leaf_block);
     }
     (count, digest)
 }
@@ -233,9 +293,65 @@ fn bench_leaf_range_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_index_range_prefix(c: &mut Criterion) {
+    let indexes = build_full_index();
+    let start = u64::from(LEAF_ENTRIES_4K * INDEX_STRIDE * 9 / 10);
+    let end = start + 8;
+
+    for &(range_start, range_end) in &[
+        (0, 1),
+        (u64::from(INDEX_STRIDE - 1), u64::from(INDEX_STRIDE)),
+        (u64::from(INDEX_STRIDE), u64::from(INDEX_STRIDE) + 1),
+        (start, end),
+        ((1_u64 << 32) - 1, 1_u64 << 32),
+    ] {
+        assert_eq!(
+            index_range_linear(&indexes, range_start, range_end),
+            index_range_partitioned(&indexes, range_start, range_end),
+            "index range selection diverged for [{range_start}, {range_end})"
+        );
+    }
+    assert_eq!(
+        index_range_linear(&indexes[1..], 0, 1),
+        index_range_partitioned(&indexes[1..], 0, 1),
+        "index range selection diverged before the first separator"
+    );
+
+    let mut group = c.benchmark_group("extent_index_range_prefix_ab");
+    group.bench_function("linear_prefix_a", |b| {
+        b.iter(|| {
+            black_box(index_range_linear(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("linear_prefix_b", |b| {
+        b.iter(|| {
+            black_box(index_range_linear(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("partitioned_prefix", |b| {
+        b.iter(|| {
+            black_box(index_range_partitioned(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_leaf_search,
     bench_leaf_search_validation,
-    bench_leaf_range_prefix
+    bench_leaf_range_prefix,
+    bench_index_range_prefix
 );
 criterion_main!(extent_leaf_search);
