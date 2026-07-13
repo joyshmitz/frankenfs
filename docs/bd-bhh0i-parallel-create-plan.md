@@ -732,10 +732,33 @@ Ran the full local gate end-to-end on the current-main (feature-off, single-lock
 the bd-bhh0i characterization (single-lock `Ext4AllocState` serializes; residual is
 malloc-arena + MVCC commit-lock). `e2fsck -fn` on the 16-thread result = **CLEAN**
 (3020/65536 files, 13067/262144 blocks, no errors) → current-main creates correctly,
-it just doesn't scale. This is the baseline the sharded-allocator cutover must beat:
-target 8t ≥ 4x 1t (≈ ≥310k c/s) with e2fsck still clean. The A/B is now fully runnable
-locally (mke2fs workaround). NEXT: the atomic cutover wiring → feature-on rebuild →
-same gate → compare + e2fsck-clean → flip default.
+it just doesn't scale.
+
+**Tightened (median of 3 runs/thread, count=3000, e2fsck each — robust, not noise):**
+
+| threads | median c/s | vs 1t | e2fsck |
+|--------:|----------:|------:|:------:|
+| 1  | 68,686 | 1.00x | clean |
+| 2  | 53,813 | 0.78x | clean |
+| 4  | 51,290 | 0.75x | clean |
+| 8  | 41,427 | 0.60x | clean |
+| 16 | 34,832 | 0.51x | clean |
+
+Per-thread run spread ~2-6% (tight). e2fsck-clean at EVERY thread count. This is the
+firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
+(≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
+runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
+wiring — it is genuinely atomic (the sharded PerGroupAlloc is cloned from
+alloc_state.groups at enable_writes; if flag-on routes only SOME alloc ops through
+sharded while others use the single-lock groups, the two free-state copies diverge →
+double-allocation → corruption; even scoping to ext4_create alone breaks, since
+create-bench's initial per-thread `mkdir`s allocate via the single lock and the creates
+would then use stale sharded counts). So ALL allocating ops must switch together, each
+restructured to NOT hold the `ext4_alloc_state.write()` guard when flag-on (that lock-hold
+is what serializes; a mere alloc-call swap keeps the serialization). That per-op
+lock-restructure across ~15 `alloc_blocks_persist` sites + inode-alloc + fold consumers is
+the correctness-critical, fresh-context multi-turn step → feature-on rebuild → rerun this
+exact gate → compare + e2fsck-clean → flip default.
 
 **Execution note (why not rushed this turn):** the wiring is atomic (the sharded
 structure must become authoritative for ALL allocating ops at once — a partial wire
