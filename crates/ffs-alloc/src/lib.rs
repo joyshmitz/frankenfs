@@ -3678,6 +3678,117 @@ pub fn free_inode_persist(
     Ok(())
 }
 
+/// Free inode `ino` — which MUST belong to `group` — operating on that one group's
+/// `&mut GroupStats` under the caller's lock. The per-group INODE-free counterpart
+/// to [`try_alloc_inode_in_group_persist_core`], mirroring the single-group
+/// [`free_inode_persist`] statement-for-statement (double-free + reserved checks,
+/// bitmap clear, `inode_search_start` rewind, `free_inodes`/`used_dirs` update,
+/// group-descriptor persist, and full rollback on a GDT-write failure).
+///
+/// The bd-bhh0i sharded create-rollback composes this under the owning group's
+/// `Mutex` (the inode was allocated lock-free via the sharded allocator, so the
+/// single-lock `free_inode_persist` over `&mut [GroupStats]` would free it against
+/// the wrong structure). `free_inode_persist` is left UNTOUCHED (single-lock
+/// byte-identical); the `free_inode_in_group_matches_free_inode_persist` differential
+/// test locks this replica to it byte-for-byte.
+#[expect(clippy::too_many_arguments)]
+pub fn free_inode_in_group(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    geo: &FsGeometry,
+    stats: &mut GroupStats,
+    group: GroupNumber,
+    ino: InodeNumber,
+    is_dir: bool,
+    pctx: &PersistCtx,
+) -> Result<()> {
+    if geo.inodes_per_group == 0 {
+        return Err(FfsError::Format(
+            "free_inode_in_group: inodes_per_group is zero".into(),
+        ));
+    }
+    let ino_zero = ino.0.checked_sub(1).ok_or_else(|| FfsError::Corruption {
+        block: 0,
+        detail: "inode number 0 is invalid".into(),
+    })?;
+    if ino.0 > u64::from(geo.total_inodes) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("inode {} exceeds total inode count", ino.0),
+        });
+    }
+    // `group`/`stats` are supplied by the caller (which resolved the inode's group
+    // and holds its lock); the `bit_idx >= inodes_in_group` bound below validates
+    // the inode really belongs to `group`.
+    let bitmap_block = stats.inode_bitmap_block;
+    let bitmap_buf = dev.read_block(cx, bitmap_block)?;
+    let mut bitmap = bitmap_buf.as_slice().to_vec();
+    let mut rollback_set_bits = Vec::with_capacity(1);
+    let previous_free_inodes = stats.free_inodes;
+    let previous_inode_search_start = stats.inode_search_start;
+    let bit_idx = u32::try_from(ino_zero % u64::from(geo.inodes_per_group)).map_err(|_| {
+        FfsError::Corruption {
+            block: 0,
+            detail: format!("free_inode_in_group: inode {} bit index exceeds u32", ino.0),
+        }
+    })?;
+    let inodes_in_group = geo.inodes_in_group(group);
+    if bit_idx >= inodes_in_group {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("inode {} is outside group {} inode capacity", ino.0, group.0),
+        });
+    }
+    if !bitmap_get(&bitmap, bit_idx) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("double-free: inode {} already free in bitmap", ino.0),
+        });
+    }
+    let reserved = reserved_inodes_in_group(geo, group);
+    if is_reserved(&reserved, bit_idx) {
+        return Err(FfsError::Corruption {
+            block: 0,
+            detail: format!("attempt to free reserved inode {}", ino.0),
+        });
+    }
+
+    bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
+    let inode_bitmap_override =
+        BitmapOverride::from_flipped_bit_range(&bitmap, bit_idx, 1, pctx.inodes_per_group);
+    dev.write_block(cx, bitmap_block, &bitmap)?;
+    let previous_used_dirs = stats.used_dirs;
+    stats.rewind_inode_search_start_on_free(bit_idx);
+    stats.free_inodes = stats.free_inodes.saturating_add(1);
+    if is_dir {
+        stats.used_dirs = stats.used_dirs.saturating_sub(1);
+    }
+
+    if let Err(error) = persist_group_desc_with_bitmap_overrides(
+        cx,
+        dev,
+        pctx,
+        group,
+        &stats,
+        None,
+        Some(&inode_bitmap_override),
+    ) {
+        stats.free_inodes = previous_free_inodes;
+        stats.used_dirs = previous_used_dirs;
+        stats.inode_search_start = previous_inode_search_start;
+        rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
+        restore_bitmap_after_group_desc_error(
+            cx,
+            dev,
+            bitmap_block,
+            &bitmap,
+            "inode bitmap free",
+            error,
+        )?;
+    }
+    Ok(())
+}
+
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
 fn cx_checkpoint(cx: &Cx) -> Result<()> {
@@ -5551,6 +5662,108 @@ mod tests {
         for &csum in &[false, true] {
             for &count in &[1u32, 3, 8] {
                 run_case(csum, count);
+            }
+        }
+
+        set_gdt_persistence_deferred_for_test(None);
+    }
+
+    /// Differential lock: [`free_inode_in_group`] (the bd-bhh0i sharded per-group
+    /// inode-free core) must produce byte-identical on-disk (inode bitmap + group
+    /// descriptor) AND in-memory (free_inodes, used_dirs, inode_search_start) state
+    /// to the single-lock [`free_inode_persist`] for an inode in one group — across
+    /// csum/non-csum filesystems and file/dir inodes (the dir case exercises the
+    /// used_dirs decrement). Lets `free_inode_persist` stay UNTOUCHED while the
+    /// sharded create-rollback composes the replica under a per-group lock.
+    #[test]
+    fn free_inode_in_group_matches_free_inode_persist() {
+        set_gdt_persistence_deferred_for_test(Some(false));
+        let cx = test_cx();
+
+        let run_case = |has_metadata_csum: bool, is_dir: bool| {
+            let mut geo = make_geometry();
+            let pctx = if has_metadata_csum {
+                geo.desc_size = 64;
+                PersistCtx {
+                    gdt_block: BlockNumber(50),
+                    desc_size: 64,
+                    has_metadata_csum: true,
+                    csum_seed: 0x1357_2468,
+                    uuid: [0x5A; 16],
+                    group_desc_checksum_kind:
+                        ffs_ondisk::ext4::Ext4GroupDescChecksumKind::MetadataCsum,
+                    blocks_per_group: geo.blocks_per_group,
+                    inodes_per_group: geo.inodes_per_group,
+                }
+            } else {
+                make_persist_ctx()
+            };
+
+            // Reference: single-lock free_inode_persist.
+            let dev_a = MemBlockDevice::new(4096);
+            let mut groups_a = make_groups(&geo);
+            seed_gdt_block(&dev_a, &pctx, &groups_a);
+            let alloc_a =
+                alloc_inode_persist(&cx, &dev_a, &geo, &mut groups_a, GroupNumber(0), is_dir, &pctx)
+                    .unwrap();
+
+            // Replica: sharded free_inode_in_group, seeded + allocated identically.
+            let dev_b = MemBlockDevice::new(4096);
+            let mut groups_b = make_groups(&geo);
+            seed_gdt_block(&dev_b, &pctx, &groups_b);
+            let alloc_b =
+                alloc_inode_persist(&cx, &dev_b, &geo, &mut groups_b, GroupNumber(0), is_dir, &pctx)
+                    .unwrap();
+            assert_eq!(alloc_a.ino, alloc_b.ino, "identical alloc precondition");
+            assert_eq!(alloc_a.group, alloc_b.group);
+
+            free_inode_persist(&cx, &dev_a, &geo, &mut groups_a, alloc_a.ino, is_dir, &pctx).unwrap();
+
+            let gidx = alloc_b.group.0 as usize;
+            free_inode_in_group(
+                &cx,
+                &dev_b,
+                &geo,
+                &mut groups_b[gidx],
+                alloc_b.group,
+                alloc_b.ino,
+                is_dir,
+                &pctx,
+            )
+            .unwrap();
+
+            assert_eq!(
+                groups_a[gidx].free_inodes, groups_b[gidx].free_inodes,
+                "free_inodes (csum={has_metadata_csum}, dir={is_dir})"
+            );
+            assert_eq!(
+                groups_a[gidx].used_dirs, groups_b[gidx].used_dirs,
+                "used_dirs (csum={has_metadata_csum}, dir={is_dir})"
+            );
+            assert_eq!(
+                groups_a[gidx].inode_search_start, groups_b[gidx].inode_search_start,
+                "inode_search_start (csum={has_metadata_csum}, dir={is_dir})"
+            );
+
+            let bmp_a = dev_a.read_block(&cx, groups_a[gidx].inode_bitmap_block).unwrap();
+            let bmp_b = dev_b.read_block(&cx, groups_b[gidx].inode_bitmap_block).unwrap();
+            assert_eq!(
+                bmp_a.as_slice(),
+                bmp_b.as_slice(),
+                "inode bitmap bytes (csum={has_metadata_csum}, dir={is_dir})"
+            );
+            let gdt_a = dev_a.read_block(&cx, pctx.gdt_block).unwrap();
+            let gdt_b = dev_b.read_block(&cx, pctx.gdt_block).unwrap();
+            assert_eq!(
+                gdt_a.as_slice(),
+                gdt_b.as_slice(),
+                "GDT block bytes (csum={has_metadata_csum}, dir={is_dir})"
+            );
+        };
+
+        for &csum in &[false, true] {
+            for &is_dir in &[false, true] {
+                run_case(csum, is_dir);
             }
         }
 
