@@ -678,3 +678,39 @@ through these under the flag (inode `target = spread_start_group(...)`, dirs via
 (step 2) and the MANDATORY local e2fsck + positive-scaling gates (step 3). The wiring
 is the first slice that TOUCHES the mutation path, so it is the loom-model-gated,
 multi-turn cutover proper — not a further additive primitive.
+
+## 2026-07-13 — CUTOVER RE-GREENLIT (remote-only relaxed) + dcg-gate blocker surfaced
+
+Owner (AskUserQuestion, this session) chose "Relax remote-only for bd-bhh0i" → the
+local cutover gates are authorized. State re-verified: **all step-1 primitives are
+complete and remote-validated** (alloc_blocks/alloc_inode, total_free, group_free_
+snapshot, choose_dir_group, spread_start_group, write_inode_at; Loom 7/7; single- +
+multi-thread integration tests). The `CreateBench` ffs-cli subcommand exists
+(main.rs:735/1997 → `createbench_cmd`). What remains is **only the atomic wiring**
+(plan step 1) — route `ext4_create`/`mknod`/`mkdir`/`unlink`/`link`/`symlink`/
+`fallocate`/rename + the fold/`groups` readers through the sharded structure under
+`#[cfg(feature="bhh0i_sharded_alloc")]`, flag-off byte-identical.
+
+**⛔ NEW BLOCKER — dcg blocks the mandatory local gate.** `mkfs.ext4` (matched by
+`system.disk:mkfs`) and `e2fsck` are both refused by the destructive-command guard
+(dcg) — even `which mkfs.ext4` is blocked. So step-3's `mkfs.ext4 <img>` +
+`e2fsck -fn` (the MANDATORY 0-orphan/0-drift/correct-count gate; two prior attempts
+corrupted, so this gate is non-negotiable) CANNOT be run by the agent. Relaxing
+remote-only did not relax dcg. RESOLUTION NEEDED from owner: either run the
+`mkfs.ext4` + `e2fsck -fn` steps themselves via the session `! <cmd>` prefix (agent
+prepares exact commands + builds the flag-on/flag-off ffs-cli remotely via rch,
+retrievable through the DEFAULT target), OR grant a dcg exception for `mkfs.ext4`/
+`e2fsck` on scratch `/data/tmp/*.img` files.
+
+**Execution note (why not rushed this turn):** the wiring is atomic (the sharded
+structure must become authoritative for ALL allocating ops at once — a partial wire
+diverges the sharded vs single-lock free-state → corruption), correctness-critical
+(e2fsck-clean mandatory), and per this plan's own guidance a FOCUSED effort. It was
+NOT started in this heavy, many-turn conversation context, and — decisively — it
+could not be VALIDATED this turn regardless, because the e2fsck gate is dcg-blocked.
+NEXT: with the dcg-gate resolved, execute the wiring in fresh context → remote
+conformance (step 2) → owner runs local `mkfs.ext4`+`create-bench --threads
+{1,2,4,8,16}`+`e2fsck -fn` (step 3) → flip default only on e2fsck-clean + positive
+scaling (step 4). Build recipe for the gate binaries: `RCH_REQUIRE_REMOTE=1 env -u
+CARGO_TARGET_DIR rch exec -- cargo build -p ffs-cli --release [--features
+ffs-core/bhh0i_sharded_alloc]` → `./target/release/ffs-cli` retrieved locally.
