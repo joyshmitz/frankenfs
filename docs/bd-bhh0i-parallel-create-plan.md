@@ -929,14 +929,29 @@ supplies it.
    wraps `alloc` in `SingleLockDirAlloc{ alloc: &mut *alloc }` in its MultiLevelIndex
    return arm. Gated `cargo test -p ffs-core --features bhh0i_sharded_alloc htree`:
    12 htree unit tests + htree_leaf_split_gate integration = all pass, byte-identical.
-   **4b NEXT**: (c) `ext4_rebuild_htree_dir` (leaf; its TWO callers in
-   `ext4_add_dir_entry` each wrap `alloc` in SingleLockDirAlloc). 4c: (a)
-   `ext4_split_htree_leaf_and_add` — now convertible since (b) is done, so a's b-call
-   passes its `backend` straight through (removes the 4a wrap); a's caller (d) wraps.
-   4d: linear-grow in (d) `ext4_add_dir_entry` — d builds ONE SingleLockDirAlloc at
-   the top, passes it to a/c and uses it for its own linear alloc/insert/write. Each
-   slice: convert one helper + its single-lock caller, gate `... htree` (byte-identical
-   single-lock → NO e2fsck needed yet). GOTCHA (confirmed in 4a): snapshot `let geo =
+   ✅ 4b DONE (`ca10d9f9`): (a) `ext4_split_htree_leaf_and_add` (REORDERED ahead of
+   (c) — see below). Its MultiLevelIndex arm now forwards its OWN backend to (b)
+   (removed the 4a temporary wrap); caller (d) wraps `alloc` in SingleLockDirAlloc
+   inside the `if !casefold` block (reborrow drops before the rebuild fallthrough).
+   Same htree gate green, byte-identical.
+   ⚠️ (c) `ext4_rebuild_htree_dir` DEFERRED behind a new seam method: it also calls
+   `ffs_extent::truncate_extents(cx, dev, root, geo, groups, m_blocks, pctx, owner)
+   -> freed:u64` (a FREE path — shrinks the extent tree AND frees the tail data
+   blocks) which the seam does NOT cover. It also does its block alloc via a
+   DESTRUCTURE `let Ext4AllocState{geo,groups,persist_ctx} = &mut *alloc;` in a loop
+   (route each iteration through dir_alloc_blocks/dir_insert_extent).
+   **NEXT (5-seam): add `DirAllocBackend::dir_truncate_extents(cx, dev, root_bytes,
+   keep_blocks, ino, generation) -> Result<u64>`.** SingleLock = current
+   `ffs_extent::truncate_extents` over `&mut self.alloc.groups` (byte-identical).
+   Sharded = a sharded truncate: needs a `ffs_extent::truncate_extents` variant that
+   routes tree-node frees through a `&mut dyn ffs_btree::BlockAllocator`
+   (ShardedTreeBlockAllocator) AND data-block frees through a free callback / the
+   sharded free — a genuinely NEW ffs-extent primitive (mirror how alloc side split
+   into try_alloc_blocks_in_group). THEN 4c: convert (c) using dir_alloc_blocks +
+   dir_insert_extent + dir_truncate_extents + dir_write_inode. THEN 4d: linear-grow
+   in (d) `ext4_add_dir_entry` — d builds ONE SingleLockDirAlloc, passes to a/c and
+   uses for its own linear alloc/insert/write. Gate each `... htree` (byte-identical
+   single-lock → NO e2fsck yet). GOTCHA (confirmed 4a/4b): snapshot `let geo =
    backend.dir_geo();` at the top and route ALL `alloc.geo` reads (block_size,
    sectors_per_block, `numa_allocation_hint(&geo)`) through it — owned POD clone,
    identical values, no borrow held across the backend's &mut calls.
