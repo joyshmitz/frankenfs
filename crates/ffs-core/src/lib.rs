@@ -18337,9 +18337,19 @@ impl OpenFs {
             // the single-entry cache degrades to neutral (not wrong) under a mixed
             // create+file-write workload (bd-cc-dirextcache).
             Self::ext4_reject_inline_data_dir(parent_inode)?;
-            let extents = self
-                .ext4_write_extents_with_scope(cx, &RequestScope::empty(), parent_inode)?
-                .to_vec();
+            // Hold the shared `Arc<[Ext4Extent]>` snapshot directly instead of
+            // copying it into an owned `Vec` on every insert: the downstream
+            // helpers only borrow it (`&extents` deref-coerces to
+            // `&[Ext4Extent]`) and the growth path only reads `.last()`, so the
+            // per-create allocation + extent-list copy was pure waste. The Arc
+            // is an independent owned handle (the cache may invalidate its own
+            // copy mid-insert on growth; ours stays the correct pre-insert
+            // snapshot), exactly as the `to_vec` copy was — byte-identical.
+            let extents = self.ext4_write_extents_with_scope(
+                cx,
+                &RequestScope::empty(),
+                parent_inode,
+            )?;
 
             // Try adding to each existing block.
             let child_ino_u32 = u32::try_from(child_ino.0)
