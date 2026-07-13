@@ -13119,6 +13119,51 @@ impl OpenFs {
         Ok(all_entries)
     }
 
+    /// Return whether an ext4 directory holds any entry other than `.` and
+    /// `..` — the rmdir / rename-clobber emptiness test.
+    ///
+    /// Equivalent to `!read_dir_with_scope(..)?.iter().any(|e| e.name != b"."
+    /// && e.name != b"..")`, but early-exits on the FIRST real entry instead of
+    /// materializing every entry (and its `name` allocation) into a vector. It
+    /// walks the same present, non-unwritten blocks via `resolve_extent_seq`,
+    /// reads each through the same cache, and parses each with the SAME
+    /// `parse_dir_block` used by `read_dir_with_scope`, so the boolean result is
+    /// identical by construction: the directory is empty here iff `read_dir`
+    /// would yield only `.` and `..`. Inline-data-dir rejection, resolve errors,
+    /// and parse errors surface identically and in the same lowest-block order.
+    /// The reject path for a non-empty directory is therefore O(1) in blocks
+    /// (it stops at the block holding the first real entry) rather than reading
+    /// and parsing the whole directory only to discard it.
+    fn ext4_directory_is_empty(
+        &self,
+        cx: &Cx,
+        scope: &RequestScope,
+        inode: &Ext4Inode,
+    ) -> Result<bool, FfsError> {
+        Self::ext4_reject_inline_data_dir(inode)?;
+        let bs = u64::from(self.block_size());
+        let block_size = self.block_size();
+        let num_blocks = dir_logical_block_count(inode.size, bs)?;
+        let mut ehint = 0_usize; // sequential mapping hint (bd-vpypn)
+        for lb in 0..num_blocks {
+            let Some((phys, unwritten)) = self.resolve_extent_seq(cx, scope, inode, lb, &mut ehint)?
+            else {
+                continue; // hole: contributes no entries (as in read_dir)
+            };
+            if unwritten {
+                continue;
+            }
+            let block_data =
+                self.read_ext4_file_data_block_with_scope(cx, scope, BlockNumber(phys))?;
+            let (entries, _tail) =
+                parse_dir_block(&block_data, block_size).map_err(|e| parse_to_ffs_error(&e))?;
+            if entries.iter().any(|e| e.name != b"." && e.name != b"..") {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// Look up a single name in a directory inode via the device.
     ///
     /// Returns the matching `Ext4DirEntry` if found, `None` otherwise.
@@ -19866,13 +19911,10 @@ impl OpenFs {
                 if !child_inode.is_dir() {
                     return Err(FfsError::NotDirectory);
                 }
-                // Check directory is empty (only . and ..).
-                let entries = self.read_dir(cx, &child_inode)?;
-                let real_entries = entries
-                    .iter()
-                    .filter(|e| e.name != b"." && e.name != b"..")
-                    .count();
-                if real_entries > 0 {
+                // Check directory is empty (only . and ..). Early-exits on the
+                // first real entry via the same parse_dir_block read_dir uses,
+                // instead of materializing the whole directory to reject it.
+                if !self.ext4_directory_is_empty(cx, &RequestScope::empty(), &child_inode)? {
                     return Err(FfsError::NotEmpty);
                 }
             } else if child_inode.is_dir() {
@@ -22412,12 +22454,9 @@ impl OpenFs {
                 if !child_inode.is_dir() {
                     return Err(FfsError::IsDirectory);
                 }
-                let entries = self.read_dir(cx, &existing_inode)?;
-                let real_entries = entries
-                    .iter()
-                    .filter(|e| e.name != b"." && e.name != b"..")
-                    .count();
-                if real_entries > 0 {
+                // Early-exit emptiness check (same parser as read_dir) instead
+                // of materializing the whole victim directory to reject it.
+                if !self.ext4_directory_is_empty(cx, &RequestScope::empty(), &existing_inode)? {
                     return Err(FfsError::NotEmpty);
                 }
             } else if child_inode.is_dir() {
@@ -61347,6 +61386,92 @@ mod tests {
 
         let err = fs.lookup(&cx, root, OsStr::new("temp_dir")).unwrap_err();
         assert_eq!(err.to_errno(), libc::ENOENT);
+    }
+
+    #[test]
+    fn ext4_directory_is_empty_matches_read_dir_oracle() {
+        // The early-exit emptiness check must agree with the exact predicate it
+        // replaced (`read_dir(..).iter().any(non-dot)`) on every directory
+        // shape — this is a data-safety invariant (a false "empty" would let
+        // rmdir delete a populated directory).
+        let Some(fs) = open_writable_ext4() else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+
+        let check = |dir_ino: InodeNumber, label: &str| -> bool {
+            let inode = fs.read_inode(&cx, dir_ino).expect("read dir inode");
+            let oracle_empty = !fs
+                .read_dir(&cx, &inode)
+                .expect("read_dir")
+                .iter()
+                .any(|e| e.name != b"." && e.name != b"..");
+            let candidate_empty = fs
+                .ext4_directory_is_empty(&cx, &RequestScope::empty(), &inode)
+                .expect("is_empty");
+            assert_eq!(
+                candidate_empty, oracle_empty,
+                "{label}: is_empty={candidate_empty} disagrees with read_dir oracle {oracle_empty}"
+            );
+            candidate_empty
+        };
+
+        // Fresh directory: only . and .. → empty.
+        let empty_dir = fs
+            .mkdir(&cx, root, OsStr::new("empty_d"), 0o755, 0, 0)
+            .expect("mkdir");
+        assert!(check(empty_dir.ino, "fresh mkdir"));
+
+        // One child → non-empty (early-exits in block 0).
+        let one_dir = fs
+            .mkdir(&cx, root, OsStr::new("one_d"), 0o755, 0, 0)
+            .expect("mkdir");
+        fs.create(&cx, one_dir.ino, OsStr::new("a.txt"), 0o644, 0, 0)
+            .expect("create");
+        assert!(!check(one_dir.ino, "one child"));
+
+        // Many children spanning multiple dir blocks → still non-empty.
+        let many_dir = fs
+            .mkdir(&cx, root, OsStr::new("many_d"), 0o755, 0, 0)
+            .expect("mkdir");
+        for i in 0..256u32 {
+            fs.create(
+                &cx,
+                many_dir.ino,
+                OsStr::new(&format!("f_{i:04}.txt")),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        }
+        assert!(!check(many_dir.ino, "many children"));
+
+        // Populate then unlink every child → empty again (deleted-slot blocks).
+        let drain_dir = fs
+            .mkdir(&cx, root, OsStr::new("drain_d"), 0o755, 0, 0)
+            .expect("mkdir");
+        for i in 0..64u32 {
+            fs.create(
+                &cx,
+                drain_dir.ino,
+                OsStr::new(&format!("g_{i:04}.txt")),
+                0o644,
+                0,
+                0,
+            )
+            .expect("create");
+        }
+        assert!(!check(drain_dir.ino, "before drain"));
+        for i in 0..64u32 {
+            fs.unlink(&cx, drain_dir.ino, OsStr::new(&format!("g_{i:04}.txt")))
+                .expect("unlink");
+        }
+        assert!(check(drain_dir.ino, "after drain"));
+        // The whole point: rmdir now succeeds on the drained directory.
+        fs.rmdir(&cx, root, OsStr::new("drain_d"))
+            .expect("rmdir drained");
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
