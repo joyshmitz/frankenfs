@@ -13,6 +13,49 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc-merge` range-overlay validator drops full-block scratch copy - 2026-07-13 (KEEP, 930045fa)
+
+Status: KEEP / BYTE-IDENTICAL / MEASURED WIN.
+
+`merge_non_overlapping_ranges` (the byte algorithm behind
+`MergeProof::{IndependentKeys,NonOverlappingExtents,TimestampOnlyInode}`) runs on
+the **contended commit path, under the shard lock**: when two txns write
+non-overlapping ranges of the SAME block (production `write()` stages
+`non_overlapping_extent_range` proofs for disjoint sub-block data writes), the
+second committer hits FCW and merges. The "staged only touched the declared
+ranges" validation was `expected = base.to_vec(); overlay staged ranges;
+expected == staged` — one **block-sized allocation + memcpy + full-block
+compare** per merge. That check is exactly "staged == base in the COMPLEMENT of
+the declared ranges"; comparing the complement gaps directly (sort the disjoint
+ranges, walk the gaps) removes the scratch buffer entirely. The merged output
+(`latest` with staged ranges overlaid) is unchanged, so it is byte-identical.
+
+Same-worker (vmi1149989) same-binary A/B, `benches/merge_range_overlay`
+(faithful transcriptions of the old vs new validator, identical inputs, one
+declared range near the block start + a disjoint `latest` write near the end =
+the common clean-merge case):
+
+| block size | old (expected_staged copy) | new (complement compare) | speedup |
+|------------|----------------------------|--------------------------|---------|
+| 4096 (ext4)| 201.19 ns                  | 154.20 ns                | 1.30x   |
+| 16384      | 801.06 ns                  | 533.31 ns                | 1.50x   |
+| 65536      | 2548.7 ns                  | 1719.1 ns                | 1.48x   |
+
+CIs cleanly separated (4K: old [197.67, 204.84] vs new [151.22, 156.99]). The
+~47 ns eliminated at 4 KiB is a 4 KiB alloc+memcpy; the win scales with block
+size as the copy dominates. Correctness: ffs-mvcc 482 lib + all integration
+tests green, incl. new `merge_non_overlapping_ranges_handles_multiple_unsorted_
+ranges` (multi-range out-of-order sort path + gap/trailing integrity).
+
+Note: the merge fires only under *conflict* (concurrent same-block writes), so
+this is a contended-path lock-hold reduction, not a single-thread hot-op win —
+it directly targets the parallel-write scaling surface (the MVCC lane the
+bd-bhh0i cutover identified as the real bottleneck). Sibling hunt logged: inode-
+table metadata writes (`write_inode`) still stage NO merge proof (default
+`Unsafe`), so concurrent creates/setattrs on inodes sharing a table block hard-
+conflict — wiring a slot-scoped `TimestampOnlyInode` proof through the inode
+write path is the next (multi-turn, local-e2fsck-gated) MVCC lever.
+
 ## `bd-bhh0i` synthetic-counter scope correction - 2026-07-10
 
 Status: REJECT AS ACTUAL-PATH EVIDENCE / RETAIN AS ROUTING EVIDENCE.
