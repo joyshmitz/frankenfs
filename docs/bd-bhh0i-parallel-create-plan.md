@@ -940,15 +940,23 @@ supplies it.
    blocks) which the seam does NOT cover. It also does its block alloc via a
    DESTRUCTURE `let Ext4AllocState{geo,groups,persist_ctx} = &mut *alloc;` in a loop
    (route each iteration through dir_alloc_blocks/dir_insert_extent).
-   **NEXT (5-seam): add `DirAllocBackend::dir_truncate_extents(cx, dev, root_bytes,
-   keep_blocks, ino, generation) -> Result<u64>`.** SingleLock = current
-   `ffs_extent::truncate_extents` over `&mut self.alloc.groups` (byte-identical).
-   Sharded = a sharded truncate: needs a `ffs_extent::truncate_extents` variant that
-   routes tree-node frees through a `&mut dyn ffs_btree::BlockAllocator`
-   (ShardedTreeBlockAllocator) AND data-block frees through a free callback / the
-   sharded free — a genuinely NEW ffs-extent primitive (mirror how alloc side split
-   into try_alloc_blocks_in_group). THEN 4c: convert (c) using dir_alloc_blocks +
-   dir_insert_extent + dir_truncate_extents + dir_write_inode. THEN 4d: linear-grow
+   ✅ TRUNCATE PRIMITIVE DONE (`a5df80e1`, ffs-extent): `TruncateBackend:
+   BlockAllocator` trait (adds `free_data_range`) + generic `truncate_extents_with<B:
+   TruncateBackend>` core (delete_range[tree] + free_data_range[data] loop);
+   `truncate_extents` is now a byte-identical thin wrapper over a GroupBlockAllocator.
+   ffs-extent 154/154. The tree-free surface was already abstracted (delete_range's
+   &mut dyn BlockAllocator); this made the DATA-free surface injectable too.
+   **NEXT (5-seam, ffs-core): (i) `impl ffs_extent::TruncateBackend for
+   ShardedTreeBlockAllocator` (free_data_range → `self.fs.ext4_sharded_free_blocks`);
+   (ii) add `DirAllocBackend::dir_truncate_extents(cx, dev, root_bytes, keep_blocks,
+   ino, generation) -> Result<u64>`** — SingleLock builds a GroupBlockAllocator +
+   `truncate_extents_with` (byte-id); Sharded builds a ShardedTreeBlockAllocator +
+   `truncate_extents_with`. Note ShardedTreeBlockAllocator already impls
+   BlockAllocator (alloc_block/free_block/finalize_node), so it satisfies the
+   TruncateBackend supertrait; just add free_data_range. THEN 4c: convert (c)
+   `ext4_rebuild_htree_dir` using dir_alloc_blocks + dir_insert_extent +
+   dir_truncate_extents + dir_write_inode (route its loop-destructure block allocs +
+   the truncate_extents call through the backend). THEN 4d: linear-grow
    in (d) `ext4_add_dir_entry` — d builds ONE SingleLockDirAlloc, passes to a/c and
    uses for its own linear alloc/insert/write. Gate each `... htree` (byte-identical
    single-lock → NO e2fsck yet). GOTCHA (confirmed 4a/4b): snapshot `let geo =
