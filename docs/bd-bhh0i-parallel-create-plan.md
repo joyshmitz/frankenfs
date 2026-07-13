@@ -786,6 +786,31 @@ base would give ~470k@16t (2.7x the kernel). Harnesses retained in scratchpad
 (kern_create.c/.py). **bd-bhh0i A/B is COMPLETE and authoritative** — only the atomic wiring
 remains.
 
+### ✅ 2026-07-13 — WIRING FEASIBILITY confirmed (last technical unknown resolved)
+
+The no-write-lock sharded path needs three inputs per alloc; all are lock-free-accessible,
+so the wiring is feasible as designed:
+- **geo** (`FsGeometry`): lock-free via `FsGeometry::from_superblock(sb)` / the existing
+  `OpenFs::ext4_geometry` field (already used lock-free elsewhere).
+- **`PersistCtx`**: `#[derive(Debug, Clone)]`, and EVERY field is immutable & superblock-
+  derived (gdt_block, desc_size, has_metadata_csum, csum_seed, uuid, group_desc_checksum_
+  kind, blocks/inodes_per_group — fixed at mkfs, never mutated after mount; constructed once
+  at `enable_writes` lib.rs:6843). → snapshot it into a lock-free field at enable_writes, or
+  reconstruct from the superblock; no lock needed. (This is why it was safe to pass `pctx` by
+  value into the already-built sharded primitives.)
+- **sharded structure** (`ext4_sharded_alloc: Option<PerGroupAlloc>`, per-group Mutexes) +
+  the primitives (`alloc_blocks`/`alloc_inode`/`total_free`/`choose_dir_group`/
+  `spread_start_group`/`write_inode_at`): DONE + tested.
+
+So no lock-free-input blocker remains. The wiring per op = a `#[cfg(feature)]` branch that
+(1) does NOT take `alloc_mutex.write()`, (2) pulls geo+pctx lock-free, (3) reconstructs the
+op's alloc+build+persist via the sharded primitives (for ext4_create: spread target →
+`alloc_inode` → build `Ext4Inode` → `write_inode_at` → sharded-block-alloc dir-entry add).
+The remaining effort is purely writing that per-op sharded code across the ~8 ops + routing
+the fold consumers to `total_free` — a focused, one-shot, e2fsck-gated pass (the harness +
+floor + kernel target are all ready). No further characterization or feasibility work is
+needed.
+
 This is the firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
 (≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
 runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
