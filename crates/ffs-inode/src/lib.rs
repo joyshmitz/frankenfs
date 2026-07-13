@@ -699,6 +699,20 @@ fn indirect_block_all_zero(data: &[u8]) -> bool {
         && tail.remainder().iter().all(|&b| b == 0)
 }
 
+/// Return the first indirect entry whose logical range is not wholly below
+/// `cutoff`. This is the closed-form equivalent of the saturating range check
+/// in `free_indirect_subtree_range`; the original predicate remains in the
+/// shortened loop as a defensive guard.
+fn first_indirect_entry_at_cutoff(base: u64, cutoff: u64, entry_span: u64, ppb: u64) -> u64 {
+    if entry_span == 0 {
+        return if base <= cutoff { ppb } else { 0 };
+    }
+    if cutoff == u64::MAX {
+        return ppb;
+    }
+    (cutoff.saturating_sub(base) / entry_span).min(ppb)
+}
+
 /// Recursively free data blocks at or beyond logical block `cutoff` within an
 /// indirect pointer block at indirection `level`, whose first entry maps logical
 /// block `base`. Frees deeper metadata blocks that become empty, zeroes the
@@ -721,6 +735,7 @@ fn free_indirect_subtree_range(
     let buf = dev.read_block(cx, block)?;
     let mut data = buf.as_slice().to_vec();
     let entry_span = ppb.saturating_pow(level - 1);
+    let first_entry = first_indirect_entry_at_cutoff(base, cutoff, entry_span, ppb);
     let mut freed = 0u64;
     let mut dirty = false;
 
@@ -730,7 +745,7 @@ fn free_indirect_subtree_range(
         // the in-memory indirect buffer) and free them in contiguous runs — one
         // bitmap read-modify-write per run instead of per block (bd-wgv6x).
         let mut to_free = Vec::new();
-        for i in 0..ppb {
+        for i in first_entry..ppb {
             let child_base = base.saturating_add(i.saturating_mul(entry_span));
             if child_base.saturating_add(entry_span) <= cutoff {
                 continue;
@@ -756,7 +771,7 @@ fn free_indirect_subtree_range(
             freed = freed.saturating_add(n);
         }
     } else {
-        for i in 0..ppb {
+        for i in first_entry..ppb {
             let child_base = base.saturating_add(i.saturating_mul(entry_span));
             // Entry's whole logical range is below the cutoff — keep untouched.
             if child_base.saturating_add(entry_span) <= cutoff {
@@ -1652,6 +1667,34 @@ mod tests {
         // Sanity: the delete actually occurred.
         assert_eq!(inode.links_count, 0);
         assert_eq!(inode.dtime, 1_700_000_001);
+    }
+
+    #[test]
+    fn indirect_cutoff_prefix_bound_matches_saturating_predicate() {
+        let ppb = 1024;
+        for &(base, cutoff, entry_span) in &[
+            (12, 11, 1),
+            (12, 12, 1),
+            (12, 13, 1),
+            (12, 912, 1),
+            (12, 1036, 1),
+            (12, u64::MAX, 1),
+            (u64::MAX - 3, u64::MAX - 2, 2),
+            (12, 11, 0),
+            (12, 12, 0),
+        ] {
+            let expected = (0..ppb)
+                .find(|&i| {
+                    let child_base = base.saturating_add(i.saturating_mul(entry_span));
+                    child_base.saturating_add(entry_span) > cutoff
+                })
+                .unwrap_or(ppb);
+            assert_eq!(
+                first_indirect_entry_at_cutoff(base, cutoff, entry_span, ppb),
+                expected,
+                "base={base} cutoff={cutoff} entry_span={entry_span}"
+            );
+        }
     }
 
     /// truncate_indirect_blocks must also free a DOUBLE-indirect subtree
