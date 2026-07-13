@@ -13,6 +13,41 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc-merge` FCW preflight validates without building the merged block - 2026-07-13 (KEEP, 60962fa1)
+
+Status: KEEP / BYTE-IDENTICAL / MEASURED WIN.
+
+The FCW **preflight** conflict check built the FULL merged block via `merge_bytes`
+only to answer "mergeable?" (`.is_ok()`), discarded it, and the install path then
+rebuilt it — one block-sized allocation + copy per conflicting block, wasted,
+under the shard lock on the contended commit path. Split the merge into validate
++ build (shared validators, cannot diverge): `MergeProof::merge_valid` (==
+`merge_bytes(..).is_some()`, no output alloc) backed by `append_only_merge_valid`
+/ `merge_non_overlapping_ranges_valid`. Preflight now validates only; install is
+unchanged.
+- MvccStore: `resolved_write_valid_with_policy` (preflight); install keeps
+  `resolved_write_bytes_with_policy`.
+- ShardedMvccStore: `resolved_write_bytes_locked` -> `check_write_mergeable_locked`
+  (its only caller was preflight); install keeps `merged_write_bytes_locked`.
+
+A/B (`benches/merge_range_overlay`, group `mvcc_merge_preflight`, same worker):
+full-merge-then-discard vs validate-only, both faithful transcriptions:
+
+| block size | full_merge (old preflight) | validate_only (new) | speedup |
+|------------|----------------------------|---------------------|---------|
+| 4096 (ext4)| 145.39 ns                  | 71.47 ns            | 2.03x   |
+| 16384      | 504.67 ns                  | 205.34 ns           | 2.46x   |
+| 65536      | 1708.0 ns                  | 1001.6 ns           | 1.71x   |
+
+CIs cleanly separated (4K: old [143.15, 147.82] vs new [70.61, 72.33]). Stacked
+on the 930045fa validator win, the same 4 KiB preflight check has gone ~230 ns ->
+71 ns (~3.2x across both landings). Byte-identical: install paths untouched, same
+merged bytes, same preflight gate + telemetry. ffs-mvcc 483 lib (incl. new
+`merge_valid_matches_merge_bytes_is_some` drift guard) + all integration green.
+Same caveat as 930045fa: fires only under *conflict* (concurrent same-block
+writes) — a contended-path lock-hold reduction on the parallel-write scaling
+surface, not a single-thread hot-op win.
+
 ## `mvcc-merge` range-overlay validator drops full-block scratch copy - 2026-07-13 (KEEP, 930045fa)
 
 Status: KEEP / BYTE-IDENTICAL / MEASURED WIN.
