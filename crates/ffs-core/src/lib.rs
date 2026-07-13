@@ -17420,6 +17420,33 @@ impl OpenFs {
         sharded.alloc_blocks(cx, dev, &geo, hint, count, &pctx)
     }
 
+    /// Sharded (no-write-lock) inode allocation for the bd-bhh0i parallel-create
+    /// cutover (third wiring slice). Mirrors [`Self::ext4_sharded_alloc_blocks`]
+    /// on the inode side: derives geo + [`PersistCtx`] lock-free and routes to
+    /// [`PerGroupAlloc::alloc_inode`] (per-group locking). `target` is the
+    /// preferred group (Part-B spread: `spread_start_group(parent, seed, gc)` for
+    /// files, Orlov `choose_dir_group` for directories — computed by the caller);
+    /// the scan fans out target→±8→full exactly like the single-lock path.
+    /// `Ok(None)` = no free inode.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_alloc_inode(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        target: GroupNumber,
+        is_directory: bool,
+    ) -> Result<Option<ffs_alloc::InodeAlloc>, FfsError> {
+        let sharded = self.ext4_sharded_alloc.as_ref().ok_or(FfsError::ReadOnly)?;
+        let sb = self.ext4_superblock().ok_or_else(|| {
+            FfsError::Format("sharded inode alloc: not an ext4 filesystem".into())
+        })?;
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = self.ext4_persist_ctx_lockfree().ok_or_else(|| {
+            FfsError::Format("sharded inode alloc: persist ctx unavailable".into())
+        })?;
+        sharded.alloc_inode(cx, dev, &geo, target, is_directory, &pctx)
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61600,6 +61627,50 @@ mod tests {
             total_after,
             total_before - 3,
             "wrapper allocs must debit total_free by exactly 3"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_alloc_inode_wrapper_allocates_bd_bhh0i() {
+        // Inode-side mirror of the block wrapper test: each call allocates an
+        // inode in a valid group and debits total_free().inodes by one.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let group_count = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .group_count();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        for call in 0..3 {
+            let alloc = fs
+                .ext4_sharded_alloc_inode(&cx, &dev, GroupNumber(0), false)
+                .unwrap_or_else(|e| panic!("wrapper inode alloc call {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("wrapper inode alloc call {call} found no free inode"));
+            assert!(
+                (alloc.group.0 as usize) < group_count,
+                "call {call}: landing group out of range"
+            );
+        }
+        let total_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        assert_eq!(
+            total_after,
+            total_before - 3,
+            "wrapper inode allocs must debit total_free().inodes by exactly 3"
         );
     }
 
