@@ -6666,8 +6666,17 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
-        // Capture write set blocks before commit consumes the transaction.
-        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
+        // Capture write set blocks before commit consumes the transaction — but
+        // ONLY when a repair-flush lifecycle is attached, the sole consumer
+        // (`notify_repair_flush_lifecycle`, which no-ops on an empty slice). In
+        // normal operation `repair_flush_lifecycle` is None, so this per-commit
+        // Vec allocation of every write-set key was pure waste (allocator pressure
+        // on the parallel-write path). Same guard idiom as the `start` timing below.
+        let write_blocks: Vec<BlockNumber> = if self.repair_flush_lifecycle.is_some() {
+            txn.write_set().keys().copied().collect()
+        } else {
+            Vec::new()
+        };
 
         debug!(
             target: "ffs::mvcc",
@@ -6775,8 +6784,17 @@ impl OpenFs {
         let txn_id = txn.id;
         let write_set_size = txn.pending_writes();
         let read_set_size = txn.read_set().len();
-        // Capture write set blocks before commit consumes the transaction.
-        let write_blocks: Vec<BlockNumber> = txn.write_set().keys().copied().collect();
+        // Capture write set blocks before commit consumes the transaction — but
+        // ONLY when a repair-flush lifecycle is attached, the sole consumer
+        // (`notify_repair_flush_lifecycle`, which no-ops on an empty slice). In
+        // normal operation `repair_flush_lifecycle` is None, so this per-commit
+        // Vec allocation of every write-set key was pure waste (allocator pressure
+        // on the parallel-write path). Same guard idiom as the `start` timing below.
+        let write_blocks: Vec<BlockNumber> = if self.repair_flush_lifecycle.is_some() {
+            txn.write_set().keys().copied().collect()
+        } else {
+            Vec::new()
+        };
 
         debug!(
             target: "ffs::mvcc",
@@ -38133,10 +38151,17 @@ impl FsOps for OpenFs {
     /// Returns `FfsError::Conflict` if the transaction cannot be committed.
     fn commit_request_scope(&self, scope: &mut RequestScope) -> ffs_error::Result<CommitSeq> {
         let tx_id = scope.tx.as_ref().map(ffs_mvcc::Transaction::id);
-        let write_blocks = scope
-            .tx
-            .as_ref()
-            .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect());
+        // Only the repair-flush lifecycle consumes write_blocks; when it is not
+        // attached (normal operation) skip the per-commit Vec allocation of every
+        // write-set key (the notify no-ops on an empty slice anyway).
+        let write_blocks = if self.repair_flush_lifecycle.is_some() {
+            scope
+                .tx
+                .as_ref()
+                .map_or_else(Vec::new, |tx| tx.write_set().keys().copied().collect())
+        } else {
+            Vec::new()
+        };
         let result = scope.commit_if_write(&self.mvcc_store);
         if let Ok(commit_seq) = &result {
             self.prune_mvcc_after_commit_if_due(*commit_seq);

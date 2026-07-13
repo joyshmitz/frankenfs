@@ -104,3 +104,7 @@ harness = false
 [[bench]]
 name = "shard_mask_false_sharing"
 harness = false
+
+[[bench]]
+name = "write_blocks_alloc"
+harness = false
