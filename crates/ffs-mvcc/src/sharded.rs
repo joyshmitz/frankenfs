@@ -949,6 +949,12 @@ impl ShardedMvccStore {
     }
 
     fn next_commit_seq(&self) -> Result<CommitSeq, CommitError> {
+        // `fetch_update` (a checked CAS loop) is retained over a wait-free
+        // `fetch_add`: the counter is BOUNDED (must error, not wrap, on
+        // exhaustion — a wrapped commit seq breaks monotonicity), and a
+        // conditional increment fundamentally needs compare-exchange. See the
+        // 2026-07-13 negative-ledger row: the wait-free variant's isolated win is
+        // real but end-to-end negligible (this atomic is <0.5% of a commit).
         match self
             .next_commit
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| {

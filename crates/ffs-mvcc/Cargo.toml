@@ -84,3 +84,7 @@ harness = false
 [[bench]]
 name = "commit_metrics_lock"
 harness = false
+
+[[bench]]
+name = "commit_seq_alloc"
+harness = false

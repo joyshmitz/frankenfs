@@ -13,6 +13,45 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc-commit` wait-free fetch_add for commit-seq / txn-id allocators - 2026-07-13 (REJECT)
+
+Status: REJECT / UNSOUND-PURE + END-TO-END-NEGLIGIBLE-GUARDED.
+
+`next_commit_seq` / `next_txn_id` allocate a monotonic counter once per commit
+via `fetch_update(|c| c.checked_add(1))` — a load + `compare_exchange` retry loop
+that re-runs on every lost race under parallel-commit contention. Idea: replace
+with a wait-free `fetch_add` (single RMW, no retries).
+
+Two failure modes:
+1. **Pure `fetch_add` is UNSOUND.** These counters are BOUNDED — they must ERROR
+   (not wrap) on exhaustion; a wrapped txn id could be reissued and a wrapped
+   commit seq breaks monotonicity. `fetch_add` wraps `u64::MAX -> 0`. Caught by
+   `transaction_id_exhaustion_returns_error_without_wrap` (asserts the counter
+   stays at MAX after an exhausted allocation). A conditional/checked increment
+   fundamentally needs compare-exchange.
+2. **Margin-guarded `fetch_add` is correct but not worth it.** A relaxed load
+   below `u64::MAX - 2^32` (margin dwarfs any concurrency, so `fetch_add` cannot
+   wrap) with a CAS fallback near the ceiling passes both exhaustion tests. But
+   the isolated A/B (`benches/commit_seq_alloc`, 200k incr/thread, same worker):
+
+   | threads | fetch_update CAS loop | margin_guarded fetch_add | delta |
+   |---------|-----------------------|--------------------------|-------|
+   | 1       | 1.587 ms              | 1.711 ms                 | ~0.93x (SLOWER, CIs overlap) |
+   | 2       | 4.743 ms              | 4.279 ms                 | 1.11x |
+   | 4       | 13.77 ms              | 11.14 ms                 | 1.24x |
+   | 8       | 38.58 ms              | 25.45 ms                 | 1.52x |
+
+   (Pure `fetch_add`, for reference, was 2.51x@8thr with no single-thread cost —
+   the guard band's relaxed load both dilutes the contended win and adds a
+   borderline single-thread regression.) Decisive: this atomic is ~7 ns of a
+   ~1.9 us commit (<0.5%), so even the 1.52x@8thr is END-TO-END SUB-NOISE (the
+   fd678afe lesson) while the guard band adds complexity + a single-thread cost.
+   Production keeps `fetch_update`.
+
+Retry predicate: only if a future profile shows the commit-seq/txn-id atomic is a
+material fraction (>5%) of commit CPU under the target parallel workload AND a
+wait-free form with no single-thread regression exists.
+
 ## `mvcc-commit` skip per-commit contention-metrics global lock under fixed policy - 2026-07-13 (KEEP, 73174f5b)
 
 Status: KEEP / BYTE-IDENTICAL-FOR-DATA / MEASURED WIN (regime-dependent, Pareto).
