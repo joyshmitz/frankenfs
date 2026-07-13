@@ -1,5 +1,49 @@
 # bd-bhh0i — Parallel metadata-write scaling: implementation plan
 
+## ⛔ 2026-07-13 LOCAL CUTOVER GATE FAILED — NEGATIVE RESULT (toggle stays default-OFF)
+
+The sharded-allocator cutover is fully built + wired + remote-validated (bd_bhh0i
+21/21, default byte-identical, feature-gated toggle FFS_BHH0I_SHARDED). The greenlit
+LOCAL create-bench A/B + e2fsck gate (release ffs-cli --features bhh0i_sharded_alloc,
+create-bench count=20000 on 1GB ext4 = 8 groups) **FAILED on two bugs**:
+
+**A/B numbers (creates/s):**
+| threads | 1 | 4 | 8 | 16 |
+|--|--|--|--|--|
+| BASELINE (single-lock) | 101015 | 60452 | 52669 | 47017 | ← negative-scales (known)
+| SHARDED (toggle on)    | 105622 | PANIC | PANIC | PANIC |
+
+- **Single-thread sharded = 105k vs baseline 101k** → NO regression, NO win (expected:
+  single-thread has no lock contention to remove).
+- **BUG 1 (SHOWSTOPPER, parallel): MVCC first-committer-wins conflict.** Every parallel
+  sharded run panics: `Format("first-committer-wins conflict on block 657:
+  snapshot=CommitSeq(19), observed=CommitSeq(20)")` (block 657 = inode-table/GDT region,
+  a SHARED metadata block). The sharded allocator removes the whole-state ALLOC LOCK,
+  but concurrent creates still CONFLICT at the MVCC COMMIT layer on shared metadata
+  blocks (the GDT packs many group descriptors per block; inode-table blocks are shared
+  within a group; 8 groups + spread-by-ThreadId-hash still collide). **So the
+  alloc-lock decomposition ALONE does NOT yield parallel-create scaling — the MVCC
+  first-committer-wins commit is the remaining serialization bottleneck.** This is the
+  deeper problem behind the whole gap; it's a PEER-MVCC-lane change, not an alloc change.
+- **BUG 2 (correctness, single-thread): EXT4_BG_INODE_UNINIT not cleared.** e2fsck on the
+  single-thread sharded image is DIRTY: `Entry 'cb_...' references inode N in group G
+  where _INODE_UNINIT is set` + `has deleted/unused inode N`. The sharded inode-alloc
+  spreads inodes into fresh groups (1,2,..) via spread_start_group, but does NOT clear
+  the group descriptor's INODE_UNINIT flag / shrink itable_unused for a newly-used group
+  (the single-lock baseline only fills group 0, already init, so it never hit this). The
+  clearing lives in an ffs-alloc GD-persist helper (~lib.rs:2216 `updated.flags &=
+  !GD_FLAG_INODE_UNINIT`); the sharded persist path (`try_alloc_inode_in_group_persist_core`
+  → `persist_group_desc_with_bitmap_overrides`) must invoke the same clearing. FIXABLE.
+
+**Verdict:** Bug 2 is a fixable sharded-alloc gap. Bug 1 is fundamental — parallel-create
+scaling needs the MVCC commit layer to stop conflicting on shared metadata (options:
+per-group GDT blocks so disjoint-group GD updates don't share a block; relax FCW for
+provably-disjoint metadata; or batch/defer GD persistence out of the per-create commit).
+That is a separate, harder effort (peer-MVCC lane). The toggle stays DEFAULT-OFF;
+production is byte-identical and unaffected. bd-bhh0i does NOT flip default.
+
+---
+
 **Status:** design (no production code landed). Owner-lane, loom-gated, multi-turn.
 **Author:** BlackThrush. **Parallelism signal:** up to ~7x across independent
 filesystem states; this is an upper-bound experiment, not a cutover payoff.
