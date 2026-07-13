@@ -2461,6 +2461,15 @@ fn createbench_cmd(path: &PathBuf, dir_path: &str, count: usize, threads: usize)
     open_fs
         .enable_writes(&cx)
         .with_context(|| "failed to enable writes (alloc state)".to_string())?;
+    // bd-bhh0i cutover A/B: FFS_BHH0I_SHARDED=1 routes create/mkdir through the
+    // lock-free sharded allocator (no whole-state write lock). Set BEFORE the setup
+    // mkdirs so they too go through the sharded structure (else the free-states
+    // diverge). No-op unless built with `--features bhh0i_sharded_alloc`.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    if std::env::var_os("FFS_BHH0I_SHARDED").is_some() {
+        open_fs.set_bhh0i_sharded_ops(true);
+        eprintln!("createbench: bd-bhh0i sharded create path ENABLED (FFS_BHH0I_SHARDED=1)");
+    }
     let mut parent = InodeNumber(1);
     for comp in dir_path.split('/').filter(|c| !c.is_empty()) {
         let attr = open_fs
