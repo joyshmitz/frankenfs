@@ -728,6 +728,25 @@ trait DirAllocBackend {
         generation: u32,
         tree_hint: ffs_alloc::AllocHint,
     ) -> Result<(), FfsError>;
+
+    /// Remove every extent at or past `keep_blocks` from the parent directory's
+    /// extent tree (`root_bytes`) and free the data blocks they mapped, freeing
+    /// extent-tree nodes AND data blocks through this backend. Returns the number
+    /// of physical blocks freed. Encapsulates the `ffs_extent::truncate_extents`
+    /// the rebuild growth path runs so the sharded backend can route BOTH free
+    /// surfaces off the single lock. `SingleLock` calls the byte-identical
+    /// `truncate_extents`; `Sharded` runs `truncate_extents_with` over a
+    /// [`ShardedTreeBlockAllocator`]. `ino`/`generation` key the external-node CRC.
+    #[allow(clippy::too_many_arguments)]
+    fn dir_truncate_extents(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        keep_blocks: u32,
+        ino: u32,
+        generation: u32,
+    ) -> Result<u64, FfsError>;
 }
 
 /// [`DirAllocBackend`] over the single-lock `Ext4AllocState` — byte-identical to
@@ -802,6 +821,29 @@ impl DirAllocBackend for SingleLockDirAlloc<'_> {
         };
         ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)
     }
+    #[allow(clippy::too_many_arguments)]
+    fn dir_truncate_extents(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        keep_blocks: u32,
+        ino: u32,
+        generation: u32,
+    ) -> Result<u64, FfsError> {
+        // Byte-identical to the rebuild growth path's inline truncate: the SAME
+        // `ffs_extent::truncate_extents` over `&mut self.alloc.groups`.
+        ffs_extent::truncate_extents(
+            cx,
+            dev,
+            root_bytes,
+            &self.alloc.geo,
+            &mut self.alloc.groups,
+            keep_blocks,
+            &self.alloc.persist_ctx,
+            ffs_extent::ExtentOwner { ino, generation },
+        )
+    }
 }
 
 /// [`DirAllocBackend`] over the sharded per-group allocator — the lock-free
@@ -860,6 +902,29 @@ impl DirAllocBackend for ShardedDirAlloc<'_> {
                 || FfsError::Format("sharded dir insert: not an ext4 filesystem".into()),
             )?;
         ffs_btree::insert(cx, dev, root_bytes, extent, &mut tree_alloc)
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn dir_truncate_extents(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        root_bytes: &mut [u8; 60],
+        keep_blocks: u32,
+        ino: u32,
+        generation: u32,
+    ) -> Result<u64, FfsError> {
+        // Sharded truncate: a `ShardedTreeBlockAllocator` frees BOTH the extent-tree
+        // nodes (via `free_block`, inside `delete_range`) AND the data blocks (via
+        // `free_data_range` → `ext4_sharded_free_blocks`), all per-group-locked.
+        let mut tree_alloc = ShardedTreeBlockAllocator::new(
+            self.fs,
+            dev,
+            ffs_alloc::AllocHint::default(),
+            ino,
+            generation,
+        )
+        .ok_or_else(|| FfsError::Format("sharded dir truncate: not an ext4 filesystem".into()))?;
+        ffs_extent::truncate_extents_with(cx, dev, root_bytes, keep_blocks, &mut tree_alloc)
     }
 }
 
@@ -956,6 +1021,23 @@ impl ffs_btree::BlockAllocator for ShardedTreeBlockAllocator<'_> {
                 self.generation,
             );
         }
+    }
+}
+
+// `ShardedTreeBlockAllocator` already impls `BlockAllocator` (extent-tree node
+// alloc/free), so it satisfies the `TruncateBackend` supertrait; adding
+// `free_data_range` lets it drive `ffs_extent::truncate_extents_with` entirely off
+// the single lock — tree-node frees via `free_block` (above), data-block frees via
+// the sharded `ext4_sharded_free_blocks`.
+#[cfg(feature = "bhh0i_sharded_alloc")]
+impl ffs_extent::TruncateBackend for ShardedTreeBlockAllocator<'_> {
+    fn free_data_range(
+        &mut self,
+        cx: &Cx,
+        start: BlockNumber,
+        count: u32,
+    ) -> Result<(), FfsError> {
+        self.fs.ext4_sharded_free_blocks(cx, self.dev, start, count)
     }
 }
 
@@ -62215,6 +62297,55 @@ mod tests {
                 "no-csum fs: finalize_node must leave the block unchanged"
             );
         }
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn sharded_tree_block_allocator_free_data_range_frees_blocks_bd_bhh0i() {
+        // The TruncateBackend data-free surface (used by truncate_extents_with for
+        // the physical blocks a removed extent mapped) must route through the
+        // sharded free: alloc a run, free it via free_data_range, total_free
+        // restored. This is the genuinely-new leaf method the sharded truncate adds.
+        use ffs_extent::TruncateBackend;
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .blocks;
+
+        let ba = fs
+            .ext4_sharded_alloc_blocks(&cx, &dev, &AllocHint::default(), 3)
+            .expect("alloc must not error")
+            .expect("alloc must find a 3-block run");
+        assert_eq!(ba.count, 3);
+        let after_alloc = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(after_alloc, total_before - 3, "alloc must debit total_free by 3");
+
+        let mut tree = ShardedTreeBlockAllocator::new(&fs, &dev, AllocHint::default(), 12, 7)
+            .expect("tree allocator builds on an ext4 fs");
+        tree.free_data_range(&cx, ba.start, ba.count)
+            .expect("free_data_range must not error");
+        let after_free = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            after_free, total_before,
+            "free_data_range must restore total_free to the pre-alloc value"
+        );
     }
 
     #[cfg(feature = "bhh0i_sharded_alloc")]
