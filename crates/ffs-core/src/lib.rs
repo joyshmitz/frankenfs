@@ -17447,6 +17447,41 @@ impl OpenFs {
         sharded.alloc_inode(cx, dev, &geo, target, is_directory, &pctx)
     }
 
+    /// Locate an inode's on-disk slot WITHOUT the alloc write lock (bd-bhh0i
+    /// cutover slice 4). `locate_inode` needs only `groups[g].inode_table_block`,
+    /// an IMMUTABLE per-group locator fixed at mkfs; the sharded allocator holds
+    /// it per group, so this briefly locks just the target group to read that
+    /// constant and reproduces `locate_inode`'s arithmetic exactly (asserted by
+    /// `ext4_sharded_locate_inode_matches_locate_inode_bd_bhh0i`). Used by the
+    /// sharded create path to read the old generation and write via
+    /// `write_inode_at` off a lock-free `InodeLocation`.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_locate_inode(&self, ino: InodeNumber) -> Option<ffs_inode::InodeLocation> {
+        let sb = self.ext4_superblock()?;
+        let geo = FsGeometry::from_superblock(sb);
+        if ino.0 == 0
+            || geo.inodes_per_group == 0
+            || geo.block_size == 0
+            || geo.inode_size == 0
+        {
+            return None;
+        }
+        let sharded = self.ext4_sharded_alloc.as_ref()?;
+        let group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
+        let gidx = group.0 as usize;
+        if gidx >= sharded.group_count() {
+            return None;
+        }
+        let inode_table_block = sharded.lock_group(gidx).inode_table_block;
+        let index = ffs_types::inode_index_in_group(ino, geo.inodes_per_group);
+        let byte_in_table = u64::from(index) * u64::from(geo.inode_size);
+        let block_offset = byte_in_table / u64::from(geo.block_size);
+        #[allow(clippy::cast_possible_truncation)]
+        let byte_offset = (byte_in_table % u64::from(geo.block_size)) as usize;
+        let block = BlockNumber(inode_table_block.0.checked_add(block_offset)?);
+        Some(ffs_inode::InodeLocation { block, byte_offset })
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61672,6 +61707,36 @@ mod tests {
             total_before - 3,
             "wrapper inode allocs must debit total_free().inodes by exactly 3"
         );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_locate_inode_matches_locate_inode_bd_bhh0i() {
+        // The lock-free inode locator must reproduce the single-lock
+        // locate_inode exactly across a spread of inode numbers.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let geo = FsGeometry::from_superblock(
+            fs.ext4_superblock().expect("ext4 superblock present"),
+        );
+        for ino_num in [1u64, 2, 11, 12, 100, 500, 1000, 5000] {
+            let ino = InodeNumber(ino_num);
+            let expected = {
+                let g = fs
+                    .ext4_alloc_state
+                    .as_ref()
+                    .expect("alloc state present")
+                    .read();
+                ffs_inode::locate_inode(ino, &geo, &g.groups)
+            };
+            let got = fs.ext4_sharded_locate_inode(ino);
+            assert_eq!(
+                got.map(|l| (l.block, l.byte_offset)),
+                expected.map(|l| (l.block, l.byte_offset)),
+                "sharded locate mismatch for inode {ino_num}"
+            );
+        }
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
