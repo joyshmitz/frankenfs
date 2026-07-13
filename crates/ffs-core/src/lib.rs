@@ -674,6 +674,125 @@ struct Ext4AllocState {
     persist_ctx: PersistCtx,
 }
 
+/// Injection seam for the bd-bhh0i directory-GROWTH path. The growth helpers
+/// (htree leaf/dx-node split, full rebuild, linear grow) allocate directory
+/// blocks and write the parent inode; the single-lock path does that through
+/// `&mut Ext4AllocState`, the sharded (parallel-create) path lock-free.
+/// Threading `&mut dyn DirAllocBackend` through those helpers lets the SAME
+/// growth logic serve both: [`SingleLockDirAlloc`] is byte-identical to the
+/// pre-cutover path, and (feature on) `ShardedDirAlloc` composes the lock-free
+/// slice-1..7b primitives. Not yet wired into the growth helpers (that is the
+/// next, focused pass); defined here so that wiring is a mechanical threading.
+#[allow(dead_code)]
+trait DirAllocBackend {
+    /// Immutable geometry (block size, per-group counts) for growth arithmetic.
+    fn dir_geo(&self) -> FsGeometry;
+    /// Allocate `count` contiguous blocks; `NoSpace` on exhaustion (matching the
+    /// single-lock `alloc_blocks_persist`).
+    fn dir_alloc_blocks(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        count: u32,
+        hint: &ffs_alloc::AllocHint,
+    ) -> Result<ffs_alloc::BlockAlloc, FfsError>;
+    /// Write `inode` at its located on-disk slot.
+    fn dir_write_inode(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError>;
+}
+
+/// [`DirAllocBackend`] over the single-lock `Ext4AllocState` — byte-identical to
+/// the pre-cutover growth path (the growth helpers made these calls directly).
+#[allow(dead_code)]
+struct SingleLockDirAlloc<'a> {
+    alloc: &'a mut Ext4AllocState,
+}
+
+impl DirAllocBackend for SingleLockDirAlloc<'_> {
+    fn dir_geo(&self) -> FsGeometry {
+        self.alloc.geo.clone()
+    }
+    fn dir_alloc_blocks(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        count: u32,
+        hint: &ffs_alloc::AllocHint,
+    ) -> Result<ffs_alloc::BlockAlloc, FfsError> {
+        ffs_alloc::alloc_blocks_persist(
+            cx,
+            dev,
+            &self.alloc.geo,
+            &mut self.alloc.groups,
+            count,
+            hint,
+            &self.alloc.persist_ctx,
+        )
+    }
+    fn dir_write_inode(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError> {
+        ffs_inode::write_inode(
+            cx,
+            dev,
+            &self.alloc.geo,
+            &self.alloc.groups,
+            ino,
+            inode,
+            csum_seed,
+        )
+    }
+}
+
+/// [`DirAllocBackend`] over the sharded per-group allocator — the lock-free
+/// growth path (bd-bhh0i). `geo` is snapshotted at construction (immutable).
+#[cfg(feature = "bhh0i_sharded_alloc")]
+#[allow(dead_code)]
+struct ShardedDirAlloc<'a> {
+    fs: &'a OpenFs,
+    geo: FsGeometry,
+}
+
+#[cfg(feature = "bhh0i_sharded_alloc")]
+impl DirAllocBackend for ShardedDirAlloc<'_> {
+    fn dir_geo(&self) -> FsGeometry {
+        self.geo.clone()
+    }
+    fn dir_alloc_blocks(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        count: u32,
+        hint: &ffs_alloc::AllocHint,
+    ) -> Result<ffs_alloc::BlockAlloc, FfsError> {
+        self.fs
+            .ext4_sharded_alloc_blocks(cx, dev, hint, count)?
+            .ok_or(FfsError::NoSpace)
+    }
+    fn dir_write_inode(
+        &mut self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError> {
+        self.fs
+            .ext4_sharded_write_inode(cx, dev, ino, inode, csum_seed)
+    }
+}
+
 /// Mutable btrfs allocation state for write operations.
 ///
 /// Mirrors `Ext4AllocState` for the btrfs path: an in-memory COW tree that
