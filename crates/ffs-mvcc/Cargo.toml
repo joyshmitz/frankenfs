@@ -88,3 +88,7 @@ harness = false
 [[bench]]
 name = "commit_seq_alloc"
 harness = false
+
+[[bench]]
+name = "active_snapshots_lock"
+harness = false

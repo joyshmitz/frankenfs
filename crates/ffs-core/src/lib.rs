@@ -38049,9 +38049,20 @@ impl FsOps for OpenFs {
             );
             (Some(snapshot), Some(txn))
         } else {
-            // Read operations use a lightweight snapshot.
+            // Read operations carry a snapshot VALUE but do NOT register it in the
+            // global `active_snapshots` map. Registration exists only to hold the GC
+            // watermark down so prune cannot remove a version the request still needs
+            // — but a read op never reads a pinned overlay version: every use of
+            // `scope.snapshot` to read an MVCC version is gated on `scope.tx.is_some()`
+            // (writes; see 12019/12135 overlay_snapshot and 11856/11910/11947), and
+            // `can_cache_ext4_read_only_block` bails on writable mounts before touching
+            // it; block reads go through the read-your-writes / base-direct adapter that
+            // is itself already unregistered (bd-bhh0i, block_device_adapter). So the
+            // per-read register+release was two acquisitions of the GLOBAL
+            // `active_snapshots` WRITE lock per read op with zero effect on read RESULTS
+            // — a serialization point on the parallel read path, now removed.
+            // `scope.snapshot` stays `Some` for the cacheability existence checks.
             let snapshot = self.current_snapshot();
-            self.mvcc_store.register_snapshot(snapshot);
             trace!(
                 target: "ffs::mvcc",
                 op = ?op,
@@ -38075,22 +38086,29 @@ impl FsOps for OpenFs {
         op: RequestOp,
         scope: RequestScope,
     ) -> ffs_error::Result<()> {
-        if let Some(snapshot) = scope.snapshot {
-            let released = self.mvcc_store.release_snapshot(snapshot);
-            if released {
-                trace!(
-                    target: "ffs::mvcc",
-                    op = ?op,
-                    snapshot_high = snapshot.high.0,
-                    "mvcc_request_scope_end_read"
-                );
-            } else {
-                warn!(
-                    target: "ffs::mvcc",
-                    op = ?op,
-                    snapshot_high = snapshot.high.0,
-                    "mvcc_request_scope_release_missed"
-                );
+        // Only WRITE scopes register a snapshot (see begin_request_scope); read
+        // scopes carry a snapshot value but never pin it in `active_snapshots`, so
+        // there is nothing to release. Keyed on `op.is_write()` (symmetric with the
+        // register condition) rather than `scope.tx`, because a committed write has
+        // already consumed its `tx` yet its snapshot is still registered.
+        if op.is_write() {
+            if let Some(snapshot) = scope.snapshot {
+                let released = self.mvcc_store.release_snapshot(snapshot);
+                if released {
+                    trace!(
+                        target: "ffs::mvcc",
+                        op = ?op,
+                        snapshot_high = snapshot.high.0,
+                        "mvcc_request_scope_end_write"
+                    );
+                } else {
+                    warn!(
+                        target: "ffs::mvcc",
+                        op = ?op,
+                        snapshot_high = snapshot.high.0,
+                        "mvcc_request_scope_release_missed"
+                    );
+                }
             }
         }
 
@@ -67876,7 +67894,13 @@ mod tests {
     }
 
     #[test]
-    fn request_scope_registers_and_releases_snapshot() {
+    fn read_request_scope_carries_snapshot_without_pinning_gc() {
+        // A read scope carries a snapshot VALUE (for cacheability existence checks)
+        // but does NOT pin it in `active_snapshots` — a read op never reads a pinned
+        // overlay version (overlay reads are gated on `scope.tx`; block reads use the
+        // live/base adapter), so pinning was two global `active_snapshots` write-lock
+        // ops per read with no effect on read results. Consistent with the sibling
+        // `writable_current_adapter_does_not_pin_gc_watermark_bd_mvccgc`.
         let image = build_ext4_image_with_state(EXT4_VALID_FS);
         let dev = TestDevice::from_vec(image);
         let cx = Cx::for_testing();
@@ -67887,17 +67911,21 @@ mod tests {
         let scope = fs
             .begin_request_scope(&cx, RequestOp::Read)
             .expect("begin request scope");
-        let pinned = scope
+        let snapshot = scope
             .snapshot
-            .expect("request scope should carry pinned snapshot");
+            .expect("read scope should carry a snapshot value");
         assert!(scope.tx.is_none(), "request scope should not allocate txn");
-        assert_eq!(fs.mvcc_active_snapshot_count(), 1);
+        assert_eq!(
+            fs.mvcc_active_snapshot_count(),
+            0,
+            "read scope must not pin the GC watermark"
+        );
 
         fs.end_request_scope(
             &cx,
             RequestOp::Read,
             RequestScope {
-                snapshot: Some(pinned),
+                snapshot: Some(snapshot),
                 tx: None,
                 commit_mode: RequestCommitMode::PerRequest,
                 skip_readdir_prefetch: false,
