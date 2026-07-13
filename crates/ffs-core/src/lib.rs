@@ -18697,6 +18697,196 @@ impl OpenFs {
         Ok(attr)
     }
 
+    /// Sharded (no-write-lock) `mkdir(2)` — the bd-bhh0i cutover twin of
+    /// [`Self::ext4_mkdir`]. Composes the lock-free sharded inode-create
+    /// (`is_directory=true`, Part-B spread target) with a [`ShardedDirAlloc`] backend
+    /// for the directory's own data block + extent map + inode write, then
+    /// [`Self::ext4_add_dir_entry`] to link it into the parent — all through the
+    /// per-group locks, no `ext4_alloc_state.write()` guard. On any post-alloc
+    /// failure BOTH the directory data block (`ext4_sharded_free_blocks`) and the
+    /// inode (`ext4_sharded_free_inode`) are rolled back, so the fs stays e2fsck-clean.
+    /// Needed for the cutover because the create-bench mkdir's a per-thread subdir
+    /// before its parallel creates — mkdir must go through the same sharded structure
+    /// or the two free-states diverge.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn ext4_mkdir_sharded(
+        &self,
+        cx: &Cx,
+        parent: InodeNumber,
+        parent_inode: &Ext4Inode,
+        name: &[u8],
+        mode: u16,
+        uid: u32,
+        gid: u32,
+        csum_seed: u32,
+        tstamp_secs: u64,
+        tstamp_nanos: u32,
+    ) -> ffs_error::Result<InodeAttr> {
+        let sb = self
+            .ext4_superblock()
+            .ok_or_else(|| FfsError::Format("not an ext4 filesystem".into()))?;
+        let dev = self.block_device_adapter();
+        let geo = FsGeometry::from_superblock(sb);
+
+        // EMLINK: a non-htree parent at the link cap can't take the new '..' link
+        // (mirrors ext4_mkdir).
+        if parent_inode.flags & ffs_types::EXT4_INDEX_FL == 0 && parent_inode.links_count >= 65_000 {
+            return Err(FfsError::Io(std::io::Error::from_raw_os_error(libc::EMLINK)));
+        }
+
+        // Duplicate-name check (POSIX EEXIST), mirroring ext4_mkdir.
+        let htree_dedup_covers = parent_inode.has_htree_index()
+            && parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL == 0
+            && Self::htree_create_dedup_enabled();
+        if !htree_dedup_covers && self.lookup_name(cx, parent_inode, name)?.is_some() {
+            return Err(FfsError::Exists);
+        }
+
+        let parent_group = GroupNumber(
+            u32::try_from(parent.0.saturating_sub(1) / u64::from(geo.inodes_per_group))
+                .map_err(|_| FfsError::Format("parent inode group index exceeds u32".into()))?,
+        );
+        let target = crate::sharded_alloc::spread_start_group(
+            parent_group,
+            Self::bhh0i_spread_seed(),
+            geo.group_count,
+        );
+
+        // Sharded inode alloc + fresh-inode write (is_directory=true → used_dirs++).
+        let (ino, mut new_inode) = self.ext4_sharded_create_inode(
+            cx,
+            &dev,
+            mode | 0o040_000, // S_IFDIR
+            uid,
+            gid,
+            target,
+            true,
+            tstamp_secs,
+            tstamp_nanos,
+        )?;
+        let ino_u32 = u32::try_from(ino.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let parent_u32 = u32::try_from(parent.0)
+            .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
+        let generation = new_inode.generation;
+        let block_size_usize = usize::try_from(geo.block_size)
+            .map_err(|_| FfsError::Format("block size does not fit usize".into()))?;
+
+        let mut backend = ShardedDirAlloc {
+            fs: self,
+            geo: geo.clone(),
+        };
+
+        // Allocate the directory's first data block. Failure here rolls back only
+        // the inode (no block allocated yet).
+        let dir_hint = self.numa_allocation_hint(
+            &geo,
+            AllocHint {
+                goal_group: Some(target),
+                ..AllocHint::default()
+            },
+            "ext4_mkdir_sharded_data_block",
+            Some(ino),
+        );
+        let dir_alloc = match backend.dir_alloc_blocks(cx, &dev, 1, &dir_hint) {
+            Ok(a) => a,
+            Err(err) => {
+                let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+                return Err(err);
+            }
+        };
+
+        // From here, any failure frees BOTH the dir block and the inode.
+        // Initialize the dir block with '.' and '..', stamp its csum tail, write.
+        let mut dir_block = vec![0u8; block_size_usize];
+        let reserved_tail = self.ext4_dir_reserved_tail();
+        if let Err(err) = ffs_dir::init_dir_block(&mut dir_block, ino_u32, parent_u32, reserved_tail)
+        {
+            let _ = self.ext4_sharded_free_blocks(cx, &dev, dir_alloc.start, 1);
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+            return Err(err);
+        }
+        self.stamp_ext4_dir_block(&mut dir_block, ino_u32, generation);
+        if let Err(err) = dev.write_block(cx, dir_alloc.start, &dir_block) {
+            let _ = self.ext4_sharded_free_blocks(cx, &dev, dir_alloc.start, 1);
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+            return Err(err);
+        }
+
+        // Map logical block 0 → the dir data block in the extent tree.
+        let extent = Ext4Extent {
+            logical_block: 0,
+            raw_len: 1,
+            physical_start: dir_alloc.start.0,
+        };
+        let mut root_bytes = Self::extent_root(&new_inode);
+        let tree_hint = self.numa_allocation_hint(
+            &geo,
+            AllocHint {
+                goal_group: Some(target),
+                ..AllocHint::default()
+            },
+            "ext4_mkdir_sharded_extent_tree",
+            Some(ino),
+        );
+        if let Err(err) =
+            backend.dir_insert_extent(cx, &dev, &mut root_bytes, extent, ino_u32, generation, tree_hint)
+        {
+            let _ = self.ext4_sharded_free_blocks(cx, &dev, dir_alloc.start, 1);
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+            return Err(err);
+        }
+        self.invalidate_ext4_write_extent_snapshot(&new_inode);
+        Self::set_extent_root(&mut new_inode, &root_bytes);
+
+        // Finalize the directory inode (size/blocks/links = '.' + parent).
+        let bs = geo.block_size;
+        new_inode.size = u64::from(bs);
+        new_inode.blocks = if new_inode.is_huge_file() {
+            1
+        } else {
+            u64::from(bs / EXT4_SECTOR_SIZE)
+        };
+        new_inode.links_count = 2;
+        if let Err(err) = backend.dir_write_inode(cx, &dev, ino, &new_inode, csum_seed) {
+            let _ = self.ext4_sharded_free_blocks(cx, &dev, dir_alloc.start, 1);
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+            return Err(err);
+        }
+
+        // Link into the parent (updates parent timestamps + link count).
+        let add_result = self.ext4_add_dir_entry(
+            cx,
+            &mut backend,
+            parent,
+            parent_inode,
+            name,
+            ino,
+            ffs_ondisk::Ext4FileType::Dir,
+            csum_seed,
+            tstamp_secs,
+            tstamp_nanos,
+        );
+        drop(backend);
+        if let Err(err) = add_result {
+            let _ = self.ext4_sharded_free_blocks(cx, &dev, dir_alloc.start, 1);
+            let _ = self.ext4_sharded_free_inode(cx, &dev, ino, true);
+            return Err(err);
+        }
+
+        trace!(
+            target: "ffs::write",
+            op = "mkdir_sharded",
+            parent = parent.0,
+            ino = ino.0,
+            name = %String::from_utf8_lossy(name),
+            "directory created (sharded)"
+        );
+
+        Ok(inode_to_attr(sb, ino, &new_inode))
+    }
+
     /// Stamp the ext4 directory-block CRC32C tail in place when the filesystem
     /// uses `metadata_csum`. No-op otherwise. Must be called on a directory data
     /// block (which carries a 12-byte checksum tail) immediately before writing
@@ -62483,6 +62673,53 @@ mod tests {
             after_free, total_before,
             "free_data_range must restore total_free to the pre-alloc value"
         );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_mkdir_sharded_creates_findable_dir_bd_bhh0i() {
+        // Sharded mkdir (no write guard): the new directory must be findable, be a
+        // valid S_IFDIR with links_count 2, and its own data block must carry a
+        // well-formed '.'/'..' (proving the dir-block alloc + init + extent map +
+        // inode write all went through the sharded path).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let parent_inode = fs.read_inode(&cx, root).expect("read root inode");
+        let sb = fs.ext4_superblock().expect("ext4 superblock");
+        let csum_seed = sb.csum_seed();
+
+        fs.ext4_mkdir_sharded(&cx, root, &parent_inode, b"shardeddir", 0o755, 0, 0, csum_seed, 0, 0)
+            .expect("sharded mkdir must succeed");
+
+        let root_after = fs.read_inode(&cx, root).expect("re-read root inode");
+        let entry = fs
+            .lookup_name(&cx, &root_after, b"shardeddir")
+            .expect("lookup must not error")
+            .expect("sharded-created dir must be findable on disk");
+        let created = fs
+            .read_inode(&cx, InodeNumber(u64::from(entry.inode)))
+            .expect("read created dir inode");
+        assert_eq!(
+            created.mode & 0xF000,
+            0x4000,
+            "created inode must be a directory (S_IFDIR)"
+        );
+        assert_eq!(created.links_count, 2, "new dir has '.' + parent links");
+
+        // The new dir's own block carries '.' (→ itself) and '..' (→ parent).
+        let dot = fs
+            .lookup_name(&cx, &created, b".")
+            .expect("lookup . ok")
+            .expect("'.' present");
+        assert_eq!(dot.inode, entry.inode, "'.' points to the dir itself");
+        let dotdot = fs
+            .lookup_name(&cx, &created, b"..")
+            .expect("lookup .. ok")
+            .expect("'..' present");
+        assert_eq!(u64::from(dotdot.inode), root.0, "'..' points to the parent");
     }
 
     #[cfg(feature = "bhh0i_sharded_alloc")]
