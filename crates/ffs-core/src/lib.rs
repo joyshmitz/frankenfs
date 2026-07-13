@@ -17393,6 +17393,33 @@ impl OpenFs {
         })
     }
 
+    /// Sharded (no-write-lock) block allocation for the bd-bhh0i parallel-create
+    /// cutover (second wiring slice). Derives the immutable geo + [`PersistCtx`]
+    /// lock-free and routes to [`PerGroupAlloc::alloc_blocks`] (per-group
+    /// locking), so disjoint-group callers never serialize on a global alloc
+    /// lock. `Ok(None)` = no free block (matching the single-lock
+    /// `alloc_blocks_persist` no-space result). Same device the single-lock path
+    /// writes bitmaps through, so on-disk effects are identical for the same
+    /// starting state.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_alloc_blocks(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        hint: &ffs_alloc::AllocHint,
+        count: u32,
+    ) -> Result<Option<ffs_alloc::BlockAlloc>, FfsError> {
+        let sharded = self.ext4_sharded_alloc.as_ref().ok_or(FfsError::ReadOnly)?;
+        let sb = self.ext4_superblock().ok_or_else(|| {
+            FfsError::Format("sharded block alloc: not an ext4 filesystem".into())
+        })?;
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = self.ext4_persist_ctx_lockfree().ok_or_else(|| {
+            FfsError::Format("sharded block alloc: persist ctx unavailable".into())
+        })?;
+        sharded.alloc_blocks(cx, dev, &geo, hint, count, &pctx)
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61537,6 +61564,43 @@ mod tests {
         );
         assert_eq!(lf.blocks_per_group, locked.blocks_per_group);
         assert_eq!(lf.inodes_per_group, locked.inodes_per_group);
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_alloc_blocks_wrapper_allocates_bd_bhh0i() {
+        // The OpenFs wrapper must derive geo+pctx lock-free and allocate like the
+        // primitive: each call returns a block and debits total_free by one.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let hint = AllocHint::default();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .blocks;
+        for call in 0..3 {
+            let alloc = fs
+                .ext4_sharded_alloc_blocks(&cx, &dev, &hint, 1)
+                .unwrap_or_else(|e| panic!("wrapper alloc call {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("wrapper alloc call {call} found no free block"));
+            assert_eq!(alloc.count, 1, "call {call}: expected exactly one block");
+        }
+        let total_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            total_after,
+            total_before - 3,
+            "wrapper allocs must debit total_free by exactly 3"
+        );
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
