@@ -987,15 +987,33 @@ supplies it.
    default-off. **The ONLY remaining work is the CUTOVER, which is LOCAL-e2fsck-gated
    and cannot be finished rch-remote-only.**
 
-   **4d-part2c = THE CUTOVER (step 5, LOCAL-e2fsck-gated, greenlit fad8e7d7):**
-   Build the sharded create path — feature-gated variants of ext4_create/mkdir/mknod/
-   symlink/rename that, when `ext4_sharded_alloc.is_some()` (feature-on), DO NOT take
-   the `ext4_alloc_state.write()` guard (that lock-hold is what serializes): alloc the
-   inode via `ext4_sharded_alloc_inode(target = spread_start_group(parent, seed, gc))`,
-   build the inode, construct `ShardedDirAlloc{ fs: self, geo }`, and call the (now
-   backend-agnostic) `ext4_add_dir_entry` with it. ALL allocating ops must switch
-   together (a partial wire diverges the sharded vs single-lock free-state →
-   double-alloc → corruption). Gate: remote compile+conformance (rch), THEN LOCAL
+   **4d-part2c = THE CUTOVER (step 5, greenlit fad8e7d7 — USER ANSWERED "Run the local
+   cutover now", so LOCAL exec is AUTHORIZED for the e2fsck/create-bench gate):**
+   Rollback primitives DONE + first op DONE:
+   ✅ `free_inode_in_group` (8d3e0d11) + `PerGroupAlloc::free_inode` /
+   `ext4_sharded_free_inode` (8daae47b) — the sharded inode-free the create-rollback needs.
+   ✅ `ext4_create_sharded` (ad0555ad): the lock-free file create — composes
+   `ext4_sharded_create_inode(spread target)` + inode_to_attr + `ext4_add_dir_entry`
+   over `ShardedDirAlloc` + `ext4_sharded_free_inode` rollback; NO write guard. Spread
+   target = `spread_start_group(parent_group, Self::bhh0i_spread_seed(), group_count)`;
+   `bhh0i_spread_seed()` = per-thread ThreadId hash (concurrent creates → distinct
+   groups). Test: sharded-create → findable on disk + S_IFREG + total_free().inodes -1.
+   **NEXT ops (each feature-gated + functional-test-gated, mirror create_sharded):**
+   - `ext4_mkdir_sharded` — the create-bench does per-thread `mkdir t{t}` (setup) then
+     parallel `create` in each subdir, so mkdir MUST be sharded too (else the cloned
+     sharded structure is stale re: the setup mkdirs → double-alloc). Compose:
+     EMLINK guard (`parent.flags & EXT4_INDEX_FL==0 && links_count>=65000` →
+     `FfsError::Io(EMLINK)`) + dedup + `ext4_sharded_create_inode(is_dir=true, target)`
+     + `ShardedDirAlloc` backend for {`dir_alloc_blocks`(1, goal target) → init_dir_block
+     (`.`/`..`)+stamp+write; `dir_insert_extent`(logical 0→dir block); set new_inode
+     size=bs/blocks/links_count=2/extent-root; `dir_write_inode`} + `ext4_add_dir_entry`
+     (Dir) + DUAL rollback (free dir block via `ext4_sharded_free_blocks` + inode via
+     `ext4_sharded_free_inode(is_dir=true)` at each failure point). ~90 lines — its own turn.
+   - Then `ext4_mknod_sharded` / `ext4_symlink_sharded` (symlink needs the target-block
+     write; mknod sets rdev) — lower priority (bench doesn't use them; needed only for
+     the full atomic flip).
+   ALL allocating ops must switch together (a partial wire diverges the sharded vs
+   single-lock free-state → double-alloc → corruption). Gate: remote compile+conformance (rch), THEN LOCAL
    (rch can't): mke2fs.ext4 img → create-bench --threads{1,2,4,8,16} (scaling MUST go
    POSITIVE, 8t≥4x1t) + create-bench 3000 → e2fsck -fn (0 orphans/drift, correct
    counts) + A/B vs flag-off → flip default only on e2fsck-clean + positive scaling =
