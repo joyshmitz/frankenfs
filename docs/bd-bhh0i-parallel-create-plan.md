@@ -714,6 +714,29 @@ the agent can run the ENTIRE local gate itself with NO dcg-allow and NO owner st
 use `mke2fs -t ext4 -F -q -b 4096 <img> <blocks>` wherever the plan says `mkfs.ext4`.
 Gate is fully unblocked; the only remaining work is the atomic cutover wiring itself.
 
+### ✅ 2026-07-13 — FLAG-OFF BASELINE measured (the A/B floor the cutover must beat)
+
+Ran the full local gate end-to-end on the current-main (feature-off, single-lock)
+`ffs-cli` (rch-built release, retrieved), fresh `mke2fs -t ext4` 1 GiB image per run,
+`create-bench / --count 3000 --threads N`:
+
+| threads | creates/s | vs 1t |
+|--------:|----------:|------:|
+| 1  | 77,563 | 1.00x |
+| 2  | 53,032 | 0.68x |
+| 4  | 46,986 | 0.61x |
+| 8  | 42,699 | 0.55x |
+| 16 | 35,155 | 0.45x |
+
+**NEGATIVE scaling confirmed** (16t = 0.45x of 1t — more threads is *slower*), matching
+the bd-bhh0i characterization (single-lock `Ext4AllocState` serializes; residual is
+malloc-arena + MVCC commit-lock). `e2fsck -fn` on the 16-thread result = **CLEAN**
+(3020/65536 files, 13067/262144 blocks, no errors) → current-main creates correctly,
+it just doesn't scale. This is the baseline the sharded-allocator cutover must beat:
+target 8t ≥ 4x 1t (≈ ≥310k c/s) with e2fsck still clean. The A/B is now fully runnable
+locally (mke2fs workaround). NEXT: the atomic cutover wiring → feature-on rebuild →
+same gate → compare + e2fsck-clean → flip default.
+
 **Execution note (why not rushed this turn):** the wiring is atomic (the sharded
 structure must become authoritative for ALL allocating ops at once — a partial wire
 diverges the sharded vs single-lock free-state → corruption), correctness-critical
