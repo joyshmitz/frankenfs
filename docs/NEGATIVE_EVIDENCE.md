@@ -6505,3 +6505,30 @@ the landed end-to-end 5.6x (shard-Mutex elimination on the hot inode). It stands
 primitive characterization of a shipped lever, not justification for a proposed one. lib.rs
 reservation released. No new lever landed this turn beyond that already-pushed bench; the
 bd-eflng residual is closed by the swarm.
+
+### 2026-07-12 (cont.) — bd-bhh0i residuals need the LOCAL create-bench; #1 (malloc-arena) is NOT micro-benchable (glibc tcache); read-path surface is swarm-closed
+
+With bd-eflng closed by the swarm (426979e3 hot-inode 5.6x + 92530219 hot-extent), the
+biggest remaining un-dominated gap is bd-bhh0i parallel-create (8.3x vs kernel at 8t,
+re-characterized: after the name-index sharding took 16x->8.3x, the residual is ~45%
+glibc malloc/free + ~25% parse + the whole-store MVCC commit write-lock). Its two levers
+are BOTH gated:
+
+1. **Thread-local block-buffer pool** (kill per-create `vec![0;bs]` block-read + `to_vec`
+   parse allocs contending on the malloc arena). REJECTED a primitive micro-bench for it
+   BY ANALYSIS before writing a misleading one: glibc **tcache** serves a tight same-size
+   alloc/free loop per-thread WITHOUT the arena lock, so a naive `vec_alloc` vs `pool_reuse`
+   micro-bench would show ~no delta and understate the win. The real ~45% contention comes
+   from the create path's buffers ESCAPING (block-read `Vec` returned owned, freed
+   post-parse) + interspersed with other work, defeating tcache — reproducible ONLY in the
+   end-to-end parallel `create-bench` (local-gated). Contrast the hot-inode/hot-extent
+   Mutex/RwLock contention, which IS cleanly isolatable (7bc099c7 = 3.17x). So this lever's
+   evidence is create-bench-only.
+2. **Finer MVCC commit locking** (5902 `mvcc_store.write().commit` serializes every parallel
+   commit). Deep ffs-mvcc + lib.rs change, loom-gated.
+
+Both #1 and #2, and the sharded-alloc cutover, resolve to the SAME blocker: the mandatory
+local `create-bench` + `e2fsck` gate (dcg blocks `mkfs`/`e2fsck`; rch can't run them). The
+reachable read/metadata micro-surface is now closed (swarm: xattr/BlockBuf/hot-inode/hot-
+extent/bd-5koeh; mine: bd-ddryj + corroborating benches). bd-bhh0i is the sole remaining
+high-value gap and it is entirely owner-local-gated — no remote-only lever remains.
