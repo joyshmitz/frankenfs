@@ -872,3 +872,36 @@ conformance (step 2) → owner runs local `mkfs.ext4`+`create-bench --threads
 scaling (step 4). Build recipe for the gate binaries: `RCH_REQUIRE_REMOTE=1 env -u
 CARGO_TARGET_DIR rch exec -- cargo build -p ffs-cli --release [--features
 ffs-core/bhh0i_sharded_alloc]` → `./target/release/ffs-cli` retrieved locally.
+
+### 2026-07-13 — PRIMITIVE: sharded FREE core landed (`1332eea2`)
+
+Landed `pub fn ffs_alloc::free_blocks_in_group` — the per-group FREE counterpart to
+the per-group ALLOC core `try_alloc_blocks_in_group`. Frees a run lying entirely
+within one group, operating on that group's `&mut GroupStats` (with `reserved`
+passed in), reproducing the single-segment path of `free_blocks_persist` verbatim
+(reserved-overlap check, double-free scan, range-clear, incremental bitmap-csum,
+GD persist, rollback). `free_blocks_persist` left UNTOUCHED (its multi-segment
+two-phase "validate-all-before-write-any" preserved → single-lock byte-identical);
+a differential test (`free_blocks_in_group_matches_free_blocks_persist_single_segment`)
+locks the replica byte-for-byte across csum/non-csum × {1,3,8}-block runs. Gate:
+`cargo test -p ffs-alloc` 216/216 (remote, rch). Additive, no feature flag (shared
+core, like the `0c379b70` alloc extraction) → production byte-identical.
+
+**Why it was the next slice:** the growth-path tree-node allocation goes through
+`ffs_btree::insert`'s `&mut dyn BlockAllocator`, which requires BOTH `alloc_block`
+AND `free_block`. The sharded `alloc_block` already routes through
+`ext4_sharded_alloc_blocks`, but there was no sharded FREE — so a sharded
+`BlockAllocator` could not be built without a landmine `free_block`. This primitive
+supplies it.
+
+**NEXT slices (toward the sharded tree `BlockAllocator` that unblocks growth):**
+1. `PerGroupAlloc::free_block` (ffs-core) — compose `free_blocks_in_group` under the
+   target group's `Mutex` (compute group+rel from the abs `BlockNumber`, read the
+   locked group's `reserved_cache`), mirroring how `PerGroupAlloc::alloc_blocks`
+   composes the alloc core. Then `OpenFs::ext4_sharded_free_blocks` wrapper
+   (lock-free geo+pctx), mirroring `ext4_sharded_alloc_blocks`.
+2. `ShardedTreeBlockAllocator` impl `ffs_btree::BlockAllocator` over `&OpenFs`+geo:
+   `alloc_block`→`ext4_sharded_alloc_blocks`(+hint update), `free_block`→
+   `ext4_sharded_free_blocks`, `finalize_node`→CRC stamp (copy `GroupBlockAllocator`).
+   This is the extent-tree-meta allocator the four growth sites need so the
+   `DirAllocBackend`-threaded growth logic (slice 8b seam) can serve the sharded path.
