@@ -973,20 +973,33 @@ supplies it.
    `let mut backend = SingleLockDirAlloc { alloc: &mut *alloc };`. Gate green
    (135 tests across create/mkdir/rename/htree/linear, 0 failed). **⭐ d's body is
    fully backend-abstracted; the signature flip is now trivial.**
-   **4d-part2b (REMOTE-gatable): flip d's SIGNATURE + wire its 7 callers.** Change the
-   param `alloc: &mut Ext4AllocState` → `backend: &mut dyn DirAllocBackend` and DELETE
-   the `let mut backend = SingleLockDirAlloc { alloc: &mut *alloc };` line (backend is
-   now the param). Then wire the 7 callers (lib.rs ~18081/18271/18492/20645/20780/
-   20841/23153 — ext4_create/mkdir/link/symlink/mknod/rename): each builds
-   `SingleLockDirAlloc { alloc: &mut *<their alloc guard> }` and passes `&mut backend`
-   (byte-identical; verify each caller doesn't use its alloc AFTER the call, else
-   scope the wrap). Gate `... create`/`... mkdir`/`... rename`/`... htree`/`... linear`.
-   THEN 4d-part2c = THE CUTOVER (step 5, LOCAL-e2fsck): the SHARDED create path passes
-   `ShardedDirAlloc{ fs, geo }` (feature-on) with inode target = spread_start_group;
-   atomic (all allocating ops switch together) + e2fsck-mandatory → LOCAL gate
-   (greenlit fad8e7d7): remote compile+conformance, then local mke2fs + create-bench
-   --threads{1,2,4,8,16} (8t≥4x1t) + e2fsck -fn (0 drift) + flip default = the 3.7x
-   win. See §2026-07-12 CUTOVER GREENLIT above for the full recipe.
+   ✅ 4d-part2b DONE (`a1f030bd`): d's SIGNATURE flipped to `backend: &mut dyn
+   DirAllocBackend`; the one SingleLockDirAlloc construction deleted; the 3 growth
+   calls reborrow the param (`&mut *backend`); all 7 callers (ext4_create/mknod/mkdir/
+   rename×2/symlink×2) wrap their RwLockWriteGuard alloc in a byte-identical
+   SingleLockDirAlloc + `drop(backend)` before their post-call alloc re-borrow. Gate
+   green (169 tests across create/mkdir/rename/symlink/mknod/htree/linear, 0 failed).
+
+   ⭐⭐⭐ REMOTE-ONLY BYTE-IDENTICAL SURFACE IS NOW COMPLETE. Every allocating op's
+   directory-entry path routes through the `DirAllocBackend` seam; production still
+   passes SingleLockDirAlloc (byte-identical). The entire sharded allocator +
+   backend seam + all growth-helper threading is built, validated remote, and
+   default-off. **The ONLY remaining work is the CUTOVER, which is LOCAL-e2fsck-gated
+   and cannot be finished rch-remote-only.**
+
+   **4d-part2c = THE CUTOVER (step 5, LOCAL-e2fsck-gated, greenlit fad8e7d7):**
+   Build the sharded create path — feature-gated variants of ext4_create/mkdir/mknod/
+   symlink/rename that, when `ext4_sharded_alloc.is_some()` (feature-on), DO NOT take
+   the `ext4_alloc_state.write()` guard (that lock-hold is what serializes): alloc the
+   inode via `ext4_sharded_alloc_inode(target = spread_start_group(parent, seed, gc))`,
+   build the inode, construct `ShardedDirAlloc{ fs: self, geo }`, and call the (now
+   backend-agnostic) `ext4_add_dir_entry` with it. ALL allocating ops must switch
+   together (a partial wire diverges the sharded vs single-lock free-state →
+   double-alloc → corruption). Gate: remote compile+conformance (rch), THEN LOCAL
+   (rch can't): mke2fs.ext4 img → create-bench --threads{1,2,4,8,16} (scaling MUST go
+   POSITIVE, 8t≥4x1t) + create-bench 3000 → e2fsck -fn (0 orphans/drift, correct
+   counts) + A/B vs flag-off → flip default only on e2fsck-clean + positive scaling =
+   the 3.7x win. See §2026-07-12 CUTOVER GREENLIT above for the full recipe.
    Gate the byte-identical single-lock conversions with `... create`/`... mkdir`/`...
    rename`/`... htree` (byte-identical
    single-lock → NO e2fsck yet). GOTCHA (confirmed 4a/4b): snapshot `let geo =
