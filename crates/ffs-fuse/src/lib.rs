@@ -5571,7 +5571,17 @@ impl FrankenFuse {
                 let fetched_served_len = (requested_len - served.len()).min(fetched.len());
                 let tail = fetched.split_off(fetched_served_len);
 
-                served.append(&mut fetched);
+                // With no cached prefix and no prefetch tail, the backend's
+                // allocation is exactly the reply: move it instead of making
+                // `Vec::append` allocate and copy the whole requested range.
+                // Keep append for partial-cache hits and coalesced reads; moving
+                // only the head of a larger prefetch buffer retains excess
+                // capacity and measured worse (bd-kdmu4).
+                if served.is_empty() && tail.is_empty() {
+                    served = fetched;
+                } else {
+                    served.append(&mut fetched);
+                }
 
                 if !tail.is_empty() {
                     let consumed = u64::try_from(fetched_served_len).unwrap_or(u64::MAX);

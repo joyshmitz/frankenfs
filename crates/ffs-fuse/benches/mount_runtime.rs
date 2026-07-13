@@ -7,7 +7,7 @@
 //! metrics recording. These operate without actual FUSE mounts.
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_core::{FsOps, InodeAttr, ReaddirPage, RequestOp, RequestScope};
 use ffs_error::FfsError;
 use ffs_fuse::per_core::{PerCoreConfig, PerCoreDispatcher, inode_to_core};
@@ -359,6 +359,99 @@ fn bench_writeback_cache_batching(c: &mut Criterion) {
     group.finish();
 }
 
+fn readahead_empty_head_append(mut fetched: Vec<u8>, head_len: usize) -> (Vec<u8>, Vec<u8>) {
+    let mut served = Vec::new();
+    let tail = fetched.split_off(head_len);
+    served.append(&mut fetched);
+    (served, tail)
+}
+
+fn readahead_empty_head_move(mut fetched: Vec<u8>, head_len: usize) -> (Vec<u8>, Vec<u8>) {
+    let tail = fetched.split_off(head_len);
+    (fetched, tail)
+}
+
+fn bench_readahead_empty_head_ownership(c: &mut Criterion) {
+    const FETCHED_LEN: usize = 256 * 1024;
+    let template: Vec<u8> = (0..FETCHED_LEN)
+        .map(|index| {
+            u8::try_from(index & 0xff)
+                .expect("masked index fits u8")
+                .wrapping_mul(131)
+        })
+        .collect();
+    assert_eq!(template.len(), template.capacity());
+
+    let control = readahead_empty_head_append(template.clone(), 128 * 1024);
+    let candidate_input = template.clone();
+    let candidate_ptr = candidate_input.as_ptr();
+    let candidate = readahead_empty_head_move(candidate_input, 128 * 1024);
+    assert_eq!(control, candidate);
+    assert_eq!(candidate_ptr, candidate.0.as_ptr());
+
+    let mut group = c.benchmark_group("mount_runtime_readahead_empty_head_ownership_128k_of_256k");
+    group.bench_function("append_copy_a", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_append(fetched, 128 * 1024)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("append_copy_b", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_append(fetched, 128 * 1024)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("move_head", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_move(fetched, 128 * 1024)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+fn bench_readahead_empty_head_ownership_no_tail(c: &mut Criterion) {
+    const FETCHED_LEN: usize = 128 * 1024;
+    let template = vec![0xA5_u8; FETCHED_LEN];
+    assert_eq!(template.len(), template.capacity());
+
+    let control = readahead_empty_head_append(template.clone(), FETCHED_LEN);
+    let candidate_input = template.clone();
+    let candidate_ptr = candidate_input.as_ptr();
+    let candidate = readahead_empty_head_move(candidate_input, FETCHED_LEN);
+    assert_eq!(control, candidate);
+    assert_eq!(candidate_ptr, candidate.0.as_ptr());
+    assert_eq!(control.0.capacity(), candidate.0.capacity());
+
+    let mut group = c.benchmark_group("mount_runtime_readahead_empty_head_ownership_128k_no_tail");
+    group.bench_function("append_copy_a", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_append(fetched, FETCHED_LEN)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("append_copy_b", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_append(fetched, FETCHED_LEN)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("move_head", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |fetched| black_box(readahead_empty_head_move(fetched, FETCHED_LEN)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     mount_runtime,
     bench_per_core_route_hash_ab,
@@ -371,5 +464,7 @@ criterion_group!(
     bench_backpressure_degraded,
     bench_backpressure_emergency,
     bench_writeback_cache_batching,
+    bench_readahead_empty_head_ownership,
+    bench_readahead_empty_head_ownership_no_tail,
 );
 criterion_main!(mount_runtime);
