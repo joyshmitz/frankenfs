@@ -17814,6 +17814,31 @@ impl OpenFs {
         sharded.free_blocks(cx, dev, &geo, start, count, &pctx)
     }
 
+    /// Sharded (no-write-lock) inode FREE for the bd-bhh0i cutover rollback — the
+    /// inode counterpart to [`Self::ext4_sharded_free_blocks`]. Derives geo +
+    /// [`PersistCtx`] lock-free and routes to [`PerGroupAlloc::free_inode`] (locks
+    /// only the group owning `ino`). Used to roll back a sharded-allocated inode
+    /// when the subsequent dir-entry insert fails. `is_dir` drives the `used_dirs`
+    /// decrement.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_free_inode(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        ino: InodeNumber,
+        is_dir: bool,
+    ) -> Result<(), FfsError> {
+        let sharded = self.ext4_sharded_alloc.as_ref().ok_or(FfsError::ReadOnly)?;
+        let sb = self.ext4_superblock().ok_or_else(|| {
+            FfsError::Format("sharded inode free: not an ext4 filesystem".into())
+        })?;
+        let geo = FsGeometry::from_superblock(sb);
+        let pctx = self.ext4_persist_ctx_lockfree().ok_or_else(|| {
+            FfsError::Format("sharded inode free: persist ctx unavailable".into())
+        })?;
+        sharded.free_inode(cx, dev, &geo, ino, is_dir, &pctx)
+    }
+
     /// Sharded (no-write-lock) inode allocation for the bd-bhh0i parallel-create
     /// cutover (third wiring slice). Mirrors [`Self::ext4_sharded_alloc_blocks`]
     /// on the inode side: derives geo + [`PersistCtx`] lock-free and routes to
@@ -62340,6 +62365,55 @@ mod tests {
         assert_eq!(
             after_free, total_before,
             "free_data_range must restore total_free to the pre-alloc value"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_free_inode_wrapper_round_trips_bd_bhh0i() {
+        // Free is the rollback counterpart to alloc: allocating an inode then
+        // freeing it through the lock-free wrapper must restore total_free().inodes
+        // exactly (the sharded create path uses this to undo the inode alloc when a
+        // subsequent dir-entry insert fails).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .inodes;
+
+        let alloc = fs
+            .ext4_sharded_alloc_inode(&cx, &dev, GroupNumber(0), false)
+            .expect("alloc must not error")
+            .expect("alloc must find a free inode");
+        let after_alloc = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        assert_eq!(
+            after_alloc,
+            total_before - 1,
+            "alloc must debit total_free().inodes by 1"
+        );
+
+        fs.ext4_sharded_free_inode(&cx, &dev, alloc.ino, false)
+            .expect("free_inode must not error");
+        let after_free = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        assert_eq!(
+            after_free, total_before,
+            "free_inode must restore total_free().inodes to the pre-alloc value"
         );
     }
 

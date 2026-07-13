@@ -325,6 +325,35 @@ impl PerGroupAlloc {
         .transpose()
     }
 
+    /// Sharded per-group inode FREE (bd-bhh0i cutover rollback): free `ino` by
+    /// locking ONLY its owning group and composing [`ffs_alloc::free_inode_in_group`]
+    /// over the locked `&mut GroupStats` — the inode counterpart to
+    /// [`Self::free_blocks`]. The sharded create path allocates the inode lock-free
+    /// via [`Self::alloc_inode`]; on a subsequent dir-entry failure this frees it
+    /// back under the same per-group lock (the single-lock `free_inode_persist` over
+    /// `&mut [GroupStats]` would free it against the wrong structure). `is_dir`
+    /// drives the `used_dirs` decrement, mirroring `alloc_inode`'s increment.
+    pub(crate) fn free_inode(
+        &self,
+        cx: &asupersync::Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        geo: &ffs_alloc::FsGeometry,
+        ino: ffs_types::InodeNumber,
+        is_dir: bool,
+        pctx: &ffs_alloc::PersistCtx,
+    ) -> Result<(), ffs_error::FfsError> {
+        let group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
+        let gidx = group.0 as usize;
+        if gidx >= self.groups.len() {
+            return Err(ffs_error::FfsError::Corruption {
+                block: 0,
+                detail: format!("sharded inode free: inode {} group out of range", ino.0),
+            });
+        }
+        let mut stats = self.lock_group(gidx);
+        ffs_alloc::free_inode_in_group(cx, dev, geo, &mut stats, group, ino, is_dir, pctx)
+    }
+
     /// Resolve an allocated inode's on-disk location (its inode-table block + byte
     /// offset within that block) from the sharded structure, so the cutover's
     /// inode-write path composes `alloc_inode` → `inode_location` →
