@@ -1293,6 +1293,13 @@ pub struct OpenFs {
     #[cfg(feature = "bhh0i_sharded_alloc")]
     #[allow(dead_code)]
     ext4_sharded_alloc: Option<crate::sharded_alloc::PerGroupAlloc>,
+    /// bd-bhh0i cutover runtime toggle: when true (and `ext4_sharded_alloc` is
+    /// present), the create/mkdir ops route to their lock-free sharded twins
+    /// instead of taking the whole-state `ext4_alloc_state.write()` guard. Default
+    /// OFF (production = single-lock byte-identical); flipped on for the local
+    /// create-bench A/B + e2fsck gate.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    bhh0i_sharded_ops: std::sync::atomic::AtomicBool,
     /// Read-only ext4 group descriptor cache.
     ///
     /// The writable path bypasses this cache because group descriptor counters
@@ -4136,6 +4143,8 @@ impl OpenFs {
             ext4_alloc_state: None,
             #[cfg(feature = "bhh0i_sharded_alloc")]
             ext4_sharded_alloc: None,
+            #[cfg(feature = "bhh0i_sharded_alloc")]
+            bhh0i_sharded_ops: std::sync::atomic::AtomicBool::new(false),
             ext4_group_desc_cache: ShardedCache::new(),
             ext4_inode_table_locations: OnceLock::new(),
             ext4_inode_table_block_cache: ShardedCache::new(),
@@ -17743,6 +17752,25 @@ impl OpenFs {
     /// copy — asserted by `ext4_persist_ctx_lockfree_matches_locked_bd_bhh0i`.
     /// Safe lock-free because every `PersistCtx` field is fixed at mkfs and
     /// never mutated after mount.
+    /// Enable/disable the bd-bhh0i sharded (lock-free) create path at runtime — for
+    /// the local create-bench A/B and e2fsck gate. When enabled AND the sharded
+    /// allocator was built at `enable_writes`, `ext4_create`/`ext4_mkdir` route to
+    /// their lock-free twins. No-op with the feature off. Returns the previous value.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    pub fn set_bhh0i_sharded_ops(&self, enabled: bool) -> bool {
+        self.bhh0i_sharded_ops
+            .swap(enabled, std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// Whether the sharded create path is currently routable (toggle on AND the
+    /// sharded allocator present).
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn bhh0i_sharded_ops_active(&self) -> bool {
+        self.bhh0i_sharded_ops
+            .load(std::sync::atomic::Ordering::Relaxed)
+            && self.ext4_sharded_alloc.is_some()
+    }
+
     #[cfg(feature = "bhh0i_sharded_alloc")]
     fn ext4_persist_ctx_lockfree(&self) -> Option<PersistCtx> {
         let sb = self.ext4_superblock()?;
@@ -18054,6 +18082,24 @@ impl OpenFs {
         let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
+        }
+
+        // bd-bhh0i cutover: when the sharded toggle is on, route to the lock-free
+        // create twin (no ext4_alloc_state.write() guard). It does its own dedup.
+        #[cfg(feature = "bhh0i_sharded_alloc")]
+        if self.bhh0i_sharded_ops_active() {
+            return self.ext4_create_sharded(
+                cx,
+                parent,
+                &parent_inode,
+                name,
+                mode,
+                uid,
+                gid,
+                csum_seed,
+                tstamp_secs,
+                tstamp_nanos,
+            );
         }
 
         // Check for duplicate name — POSIX requires EEXIST. For a hash-indexed
@@ -18485,6 +18531,25 @@ impl OpenFs {
         let parent_inode = self.read_inode(cx, parent)?;
         if !parent_inode.is_dir() {
             return Err(FfsError::NotDirectory);
+        }
+
+        // bd-bhh0i cutover: when the sharded toggle is on, route to the lock-free
+        // mkdir twin (no ext4_alloc_state.write() guard). It does its own EMLINK
+        // guard + dedup.
+        #[cfg(feature = "bhh0i_sharded_alloc")]
+        if self.bhh0i_sharded_ops_active() {
+            return self.ext4_mkdir_sharded(
+                cx,
+                parent,
+                &parent_inode,
+                name,
+                mode,
+                uid,
+                gid,
+                csum_seed,
+                tstamp_secs,
+                tstamp_nanos,
+            );
         }
 
         // A new subdirectory adds a '..' link to the parent. The kernel's
@@ -62672,6 +62737,56 @@ mod tests {
         assert_eq!(
             after_free, total_before,
             "free_data_range must restore total_free to the pre-alloc value"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn bhh0i_toggle_routes_create_and_mkdir_to_sharded_bd_bhh0i() {
+        // With the runtime toggle ON, the PUBLIC ext4_create/ext4_mkdir entry points
+        // route to their lock-free twins: both created objects are findable on disk
+        // AND the SHARDED allocator debited both inodes (the single-lock path would
+        // leave the sharded structure untouched, so this proves the routing).
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let root = InodeNumber(2);
+        let sharded_inodes_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .inodes;
+
+        assert!(!fs.set_bhh0i_sharded_ops(true), "toggle defaults off");
+
+        let mut scope = RequestScope::empty();
+        fs.ext4_create(&cx, &mut scope, root, b"tf", 0o644, 0, 0)
+            .expect("routed create must succeed");
+        fs.ext4_mkdir(&cx, &mut scope, root, b"td", 0o755, 0, 0)
+            .expect("routed mkdir must succeed");
+
+        let root_after = fs.read_inode(&cx, root).expect("re-read root");
+        assert!(
+            fs.lookup_name(&cx, &root_after, b"tf").expect("lookup").is_some(),
+            "routed-created file must be findable"
+        );
+        assert!(
+            fs.lookup_name(&cx, &root_after, b"td").expect("lookup").is_some(),
+            "routed-created dir must be findable"
+        );
+
+        let sharded_inodes_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .inodes;
+        assert_eq!(
+            sharded_inodes_after,
+            sharded_inodes_before - 2,
+            "toggle must route BOTH create + mkdir through the sharded allocator"
         );
     }
 
