@@ -13342,6 +13342,7 @@ impl OpenFs {
         Ok(None)
     }
 
+    #[cfg(test)]
     fn htree_lookup_name_with_scope(
         &self,
         cx: &Cx,
