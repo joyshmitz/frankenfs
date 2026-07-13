@@ -18349,18 +18349,18 @@ impl OpenFs {
 
     /// Attempt to insert `name -> child_ino_u32` into the parent directory's
     /// EXISTING blocks (the htree target leaf, or a linear block with free
-    /// space), staging the block write + the parent-inode update through `dev`.
-    /// Reads `alloc` immutably (geometry + group descriptors for the inode
-    /// write) and never allocates — a full target returns a `NeedsGrowth*`
-    /// outcome so the caller runs the write-locked growth path. Extracted
-    /// verbatim from `ext4_add_dir_entry` (bd-bhh0i slice A, behaviour-
-    /// preserving): the read/write/stamp order is byte-for-byte identical.
+    /// space), staging the block write through `dev`. The parent-inode update
+    /// (mtime/ctime + dir link count) is HOISTED to the caller, so this insert
+    /// is ALLOCATOR-AGNOSTIC — it no longer reads `alloc` — and can be reused by
+    /// both the single-lock and the sharded (bd-bhh0i) create paths. Never
+    /// allocates — a full target returns a `NeedsGrowth*` outcome so the caller
+    /// runs the growth path. Read/write/stamp order is byte-for-byte identical
+    /// to the original; the caller writes the parent immediately after `Inserted`.
     #[allow(clippy::too_many_arguments)]
     fn ext4_try_insert_existing(
         &self,
         cx: &Cx,
         dev: &dyn BlockDevice,
-        alloc: &Ext4AllocState,
         parent: InodeNumber,
         parent_inode: &Ext4Inode,
         extents: &[Ext4Extent],
@@ -18370,9 +18370,6 @@ impl OpenFs {
         parent_generation: u32,
         file_type: Ext4FileType,
         reserved_tail: usize,
-        csum_seed: u32,
-        tstamp_secs: u64,
-        tstamp_nanos: u32,
     ) -> ffs_error::Result<DirInsertOutcome> {
         if parent_inode.has_htree_index() {
             let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
@@ -18449,25 +18446,12 @@ impl OpenFs {
                         edit.as_ref(),
                     );
                     dev.write_block(cx, target_phys, &data)?;
-
-                    let mut parent_upd = parent_inode.clone();
-                    ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-                    if file_type == Ext4FileType::Dir {
-                        parent_upd.links_count = Self::ext4_dir_link_inc(
-                            parent_upd.links_count,
-                            parent,
-                            parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
-                        )?;
-                    }
-                    ffs_inode::write_inode(
-                        cx,
-                        dev,
-                        &alloc.geo,
-                        &alloc.groups,
-                        parent,
-                        &parent_upd,
-                        csum_seed,
-                    )?;
+                    // Parent-inode update (mtime/ctime + dir link count) is
+                    // HOISTED to the caller so this insert is allocator-agnostic
+                    // (bd-bhh0i): the caller writes the parent via the single-lock
+                    // or the sharded path after seeing `Inserted`. Order preserved
+                    // (block write here, parent write immediately after in the
+                    // caller) — byte-identical.
                     return Ok(DirInsertOutcome::Inserted);
                 }
                 Err(FfsError::NoSpace) => {
@@ -18502,25 +18486,8 @@ impl OpenFs {
                             edit.as_ref(),
                         );
                         dev.write_block(cx, block, &data)?;
-
-                        let mut parent_upd = parent_inode.clone();
-                        ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
-                        if file_type == Ext4FileType::Dir {
-                            parent_upd.links_count = Self::ext4_dir_link_inc(
-                                parent_upd.links_count,
-                                parent,
-                                parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
-                            )?;
-                        }
-                        ffs_inode::write_inode(
-                            cx,
-                            dev,
-                            &alloc.geo,
-                            &alloc.groups,
-                            parent,
-                            &parent_upd,
-                            csum_seed,
-                        )?;
+                        // Parent-inode update hoisted to the caller (bd-bhh0i) —
+                        // see the htree branch above; byte-identical order.
                         return Ok(DirInsertOutcome::Inserted);
                     }
                     Err(FfsError::NoSpace) => {}
@@ -18602,7 +18569,6 @@ impl OpenFs {
             match self.ext4_try_insert_existing(
                 cx,
                 dev,
-                alloc,
                 parent,
                 parent_inode,
                 &extents,
@@ -18612,11 +18578,31 @@ impl OpenFs {
                 parent_generation,
                 file_type,
                 reserved_tail,
-                csum_seed,
-                tstamp_secs,
-                tstamp_nanos,
             )? {
-                DirInsertOutcome::Inserted => return Ok(()),
+                DirInsertOutcome::Inserted => {
+                    // Parent-inode update hoisted out of try_insert_existing:
+                    // write it here (single-lock path) immediately after the
+                    // entry block was persisted — byte-identical to before.
+                    let mut parent_upd = parent_inode.clone();
+                    ffs_inode::touch_mtime_ctime(&mut parent_upd, tstamp_secs, tstamp_nanos);
+                    if file_type == Ext4FileType::Dir {
+                        parent_upd.links_count = Self::ext4_dir_link_inc(
+                            parent_upd.links_count,
+                            parent,
+                            parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
+                        )?;
+                    }
+                    ffs_inode::write_inode(
+                        cx,
+                        dev,
+                        &alloc.geo,
+                        &alloc.groups,
+                        parent,
+                        &parent_upd,
+                        csum_seed,
+                    )?;
+                    return Ok(());
+                }
                 DirInsertOutcome::NeedsGrowthHtree {
                     target_logical,
                     target_phys,
