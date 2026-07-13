@@ -358,6 +358,30 @@ impl BlockAllocator for GroupBlockAllocator<'_> {
     }
 }
 
+/// A [`BlockAllocator`] (used for extent-tree NODE alloc/free) that can ALSO free
+/// a range of DATA blocks. [`truncate_extents_with`] uses the `BlockAllocator`
+/// supertrait for the tree surgery (`delete_range`) and `free_data_range` for the
+/// physical data blocks the removed extents mapped — the two free surfaces a
+/// directory-shrink / file-truncate touches.
+///
+/// This lets the bd-bhh0i sharded path run a truncate entirely off the single
+/// whole-state lock: `GroupBlockAllocator` frees through `free_blocks_persist`
+/// over `&mut [GroupStats]` (byte-identical to the pre-seam `truncate_extents`),
+/// while a sharded backend (ffs-core's `ShardedTreeBlockAllocator`) routes both
+/// surfaces through per-group locks.
+pub trait TruncateBackend: BlockAllocator {
+    /// Free `count` physical data blocks starting at `start`.
+    fn free_data_range(&mut self, cx: &Cx, start: BlockNumber, count: u32) -> Result<()>;
+}
+
+impl TruncateBackend for GroupBlockAllocator<'_> {
+    fn free_data_range(&mut self, cx: &Cx, start: BlockNumber, count: u32) -> Result<()> {
+        // Identical to the pre-seam `truncate_extents` data-block free: the same
+        // `free_blocks_persist` over the same geo/groups/pctx this allocator holds.
+        ffs_alloc::free_blocks_persist(cx, self.dev, self.geo, self.groups, start, count, self.pctx)
+    }
+}
+
 /// Allocate and map `count` contiguous logical blocks starting at `logical_start`.
 ///
 /// Allocates physical blocks via `ffs-alloc`, then inserts the extent into the
@@ -556,43 +580,52 @@ pub fn truncate_extents(
     pctx: &ffs_alloc::PersistCtx,
     owner: ExtentOwner,
 ) -> Result<u64> {
+    // Thin wrapper: the single-lock backend is a `GroupBlockAllocator` over
+    // `&mut [GroupStats]`, so this is byte-identical to the pre-seam body
+    // (`delete_range` with this allocator + `free_blocks_persist` for each freed
+    // data range — exactly what `truncate_extents_with` does).
+    let mut backend = GroupBlockAllocator {
+        cx,
+        dev,
+        geo,
+        groups,
+        hint: AllocHint::default(),
+        pctx,
+        ino: owner.ino,
+        generation: owner.generation,
+    };
+    truncate_extents_with(cx, dev, root_bytes, new_logical_end, &mut backend)
+}
+
+/// Backend-agnostic core of [`truncate_extents`]: remove every extent at or past
+/// `new_logical_end` and free the data blocks they mapped, allocating/freeing
+/// extent-tree nodes AND data blocks through `backend`. `truncate_extents` passes
+/// a single-lock [`GroupBlockAllocator`]; the bd-bhh0i sharded directory-shrink
+/// passes a per-group-lock backend. Returns the number of physical blocks freed.
+pub fn truncate_extents_with<B: TruncateBackend>(
+    cx: &Cx,
+    dev: &dyn BlockDevice,
+    root_bytes: &mut [u8; 60],
+    new_logical_end: u32,
+    backend: &mut B,
+) -> Result<u64> {
     cx_checkpoint(cx)?;
     validate_root_header("truncate_extents", root_bytes)?;
 
     let mut total_freed = 0u64;
 
-    let freed_ranges = {
-        let mut tree_alloc = GroupBlockAllocator {
-            cx,
-            dev,
-            geo,
-            groups,
-            hint: AllocHint::default(),
-            pctx,
-            ino: owner.ino,
-            generation: owner.generation,
-        };
-        let count_to_delete = (1_u64 << 32).saturating_sub(u64::from(new_logical_end));
-        ffs_btree::delete_range(
-            cx,
-            dev,
-            root_bytes,
-            new_logical_end,
-            count_to_delete,
-            &mut tree_alloc,
-        )?
-    };
+    let count_to_delete = (1_u64 << 32).saturating_sub(u64::from(new_logical_end));
+    let freed_ranges = ffs_btree::delete_range(
+        cx,
+        dev,
+        root_bytes,
+        new_logical_end,
+        count_to_delete,
+        &mut *backend,
+    )?;
 
     for f in &freed_ranges {
-        ffs_alloc::free_blocks_persist(
-            cx,
-            dev,
-            geo,
-            groups,
-            BlockNumber(f.physical_start),
-            u32::from(f.count),
-            pctx,
-        )?;
+        backend.free_data_range(cx, BlockNumber(f.physical_start), u32::from(f.count))?;
         total_freed += u64::from(f.count);
     }
 
