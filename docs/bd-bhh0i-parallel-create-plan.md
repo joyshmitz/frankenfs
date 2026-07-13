@@ -776,6 +776,16 @@ raw kernel throughput (a C harness would show the kernel faster, widening the pa
 the SCALING SHAPE (positive 5x vs negative 0.48x) and the crossover conclusion are robust to
 that overhead.
 
+**Fair re-measure (C pthreads harness — matches create-bench's `thread::scope` model, no
+interpreter overhead; median of 3):** kernel 1t 35,528 · 8t 131,501 · 16t 170,862 c/s (4.8x
+scaling). Within ~7% of the Python numbers → the Python overhead was minor, the finding is
+confirmed. Authoritative A/B: FrankenFS beats kernel 2.7x at 1t (97.4k vs 35.5k), kernel
+beats FrankenFS 2.5x at 8t and 3.65x at 16t (170.9k vs 46.8k). Crossover ~2-4 threads. The
+cutover must flip FrankenFS's 0.48x → positive; matching the kernel's ~4.8x off the 97.4k 1t
+base would give ~470k@16t (2.7x the kernel). Harnesses retained in scratchpad
+(kern_create.c/.py). **bd-bhh0i A/B is COMPLETE and authoritative** — only the atomic wiring
+remains.
+
 This is the firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
 (≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
 runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
