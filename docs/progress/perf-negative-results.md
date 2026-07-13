@@ -13,6 +13,42 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc-commit` guard the monotonic any_version_installed store - 2026-07-13 (KEEP, 1382b032)
+
+Status: KEEP / BYTE-IDENTICAL / MEASURED (false-sharing mechanism).
+
+`any_version_installed` is a MONOTONIC flag (false->true once, never clears) that
+EVERY read loads to gate the MVCC overlay probe. commit's install loop stored it
+`store(true, Release)` per committed BLOCK — redundant after the first-ever install,
+and each store dirties the flag's cache line, invalidating the copy every concurrent
+reader caches (committer<->reader false sharing on the parallel path). Fix: hoist the
+store out of commit's per-block loop and guard both commit and commit_ssi with a
+relaxed load, so the Release store fires only on the false->true transition (a no-op
+after warmup). Byte-identical: flag is true after first install forever; store still
+precedes publish; two racing first-installs both store true idempotently.
+
+Bench `benches/any_version_flag_false_sharing` (4 reader threads loading the flag +
+K committer threads doing the old unconditional store vs the new guarded load, 2M
+iters each, same worker):
+
+| committers | unguarded store | guarded load | reader speedup |
+|------------|-----------------|--------------|----------------|
+| 1          | 2.825 ms        | 1.858 ms     | 1.52x          |
+| 2          | 3.109 ms        | 1.847 ms     | 1.68x          |
+| 4          | 4.342 ms        | 2.049 ms     | 2.12x          |
+
+The win grows with committer count (readers slow as more committers dirty the line;
+guarded stays flat ~1.85ms). CIs cleanly separated. HONEST SCOPE: this tight-loop
+model overstates the production magnitude — commits store at most once per commit
+(now ZERO after warmup), not in a loop — but it proves the mechanism the change
+eliminates. ffs-mvcc 484 lib + all integration green.
+
+LESSON (reusable): a monotonic set-once flag on a hot shared cache line should be
+relaxed-load-GUARDED before the Release store — the redundant stores are free CPU-
+wise but cause cross-core false sharing with the flag's many readers. WHERE TO HUNT:
+`store(true)`/`store(x)` to an already-settled atomic inside a per-op loop whose
+value is loaded by other hot paths.
+
 ## `active_snapshots` atomic-refcount (de-serialize per-write register/release) - 2026-07-13 (REJECT)
 
 Status: REJECT / REFUTED BY DE-RISKING A/B (before any production change).
