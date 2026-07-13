@@ -18954,6 +18954,14 @@ impl OpenFs {
             let parent_generation = parent_inode.generation;
             let reserved_tail = self.ext4_dir_reserved_tail();
 
+            // bd-bhh0i: ONE backend for all of d's allocation — the in-place-insert
+            // parent write, the a/c growth calls, and the linear-grow append. Single
+            // lock = byte-identical; the cutover flips this to the `backend` param so
+            // the sharded create path passes a ShardedDirAlloc.
+            let mut backend = SingleLockDirAlloc {
+                alloc: &mut *alloc,
+            };
+
             // htree (dx-indexed) directories: logical block 0 is the dx_root,
             // whose '..' rec_len slack hides the index. A linear add_entry would
             // split that slack and overwrite the dx index (bd-wb4cd). Instead,
@@ -18986,15 +18994,7 @@ impl OpenFs {
                             parent_upd.flags & ffs_types::EXT4_INDEX_FL != 0,
                         )?;
                     }
-                    ffs_inode::write_inode(
-                        cx,
-                        dev,
-                        &alloc.geo,
-                        &alloc.groups,
-                        parent,
-                        &parent_upd,
-                        csum_seed,
-                    )?;
+                    backend.dir_write_inode(cx, dev, parent, &parent_upd, csum_seed)?;
                     return Ok(());
                 }
                 DirInsertOutcome::NeedsGrowthHtree {
@@ -19015,13 +19015,6 @@ impl OpenFs {
                     // fold), so a fold-indexed dir must keep using the rebuild.
                     let casefold = parent_inode.flags & ffs_types::EXT4_CASEFOLD_FL != 0;
                     if !casefold {
-                        // bd-bhh0i: the leaf split is now backend-agnostic; the
-                        // single-lock caller wraps `alloc` in a byte-identical
-                        // SingleLock backend (reborrow → `alloc` stays usable for the
-                        // rebuild fallthrough below, which drops this backend first).
-                        let mut backend = SingleLockDirAlloc {
-                            alloc: &mut *alloc,
-                        };
                         if let Some(()) = self.ext4_split_htree_leaf_and_add(
                             cx,
                             dev,
@@ -19042,11 +19035,6 @@ impl OpenFs {
                             return Ok(());
                         }
                     }
-                    // bd-bhh0i: rebuild is now backend-agnostic; wrap in a
-                    // byte-identical SingleLock backend (this is a return site).
-                    let mut backend = SingleLockDirAlloc {
-                        alloc: &mut *alloc,
-                    };
                     return self.ext4_rebuild_htree_dir(
                         cx,
                         dev,
@@ -19076,11 +19064,6 @@ impl OpenFs {
                 .ext4_superblock()
                 .is_some_and(|sb| sb.has_compat(ffs_ondisk::ext4::Ext4CompatFeatures::DIR_INDEX));
             if has_dir_index {
-                // bd-bhh0i: rebuild is now backend-agnostic; wrap in a
-                // byte-identical SingleLock backend (this is a return site).
-                let mut backend = SingleLockDirAlloc {
-                    alloc: &mut *alloc,
-                };
                 return self.ext4_rebuild_htree_dir(
                     cx,
                     dev,
@@ -19099,12 +19082,8 @@ impl OpenFs {
 
             // No dir_index feature: keep the directory linear (kernel behaviour
             // without dir_index). Allocate a new directory block.
-            // bd-bhh0i: route this linear append through the backend (single-lock =
-            // byte-identical); the `geo` snapshot avoids borrowing the backend
-            // across its &mut alloc/insert/write calls.
-            let mut backend = SingleLockDirAlloc {
-                alloc: &mut *alloc,
-            };
+            // bd-bhh0i: the linear append uses d's single backend; the `geo`
+            // snapshot avoids borrowing the backend across its &mut calls.
             let geo = backend.dir_geo();
             let parent_new_size = parent_inode
                 .size
