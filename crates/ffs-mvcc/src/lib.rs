@@ -273,7 +273,7 @@ fn merge_non_overlapping_ranges(
         return None;
     }
 
-    let mut expected_staged = base.to_vec();
+    // Every declared range must fit within the block before we slice it.
     for range in touched_ranges {
         if range.end() > base.len() {
             warn!(
@@ -286,13 +286,33 @@ fn merge_non_overlapping_ranges(
             );
             return None;
         }
-        expected_staged[range.start..range.end()]
-            .copy_from_slice(&staged[range.start..range.end()]);
     }
 
-    // Strict validation: if the staged block modified ANYTHING outside
-    // the declared touched_ranges, the proof is invalid and we must abort.
-    if expected_staged != staged {
+    // Strict validation: if the staged block modified ANYTHING outside the
+    // declared touched_ranges, the proof is invalid and we must abort. This is
+    // exactly `base`-with-staged-ranges-overlaid == `staged`, i.e. `staged`
+    // matches `base` in the *complement* of the touched ranges. Comparing the
+    // complement gaps directly avoids materializing a full-block `expected`
+    // buffer (one block-sized allocation + copy) on the contended merge path,
+    // which runs under the shard lock. The ranges are pairwise disjoint
+    // (checked above); sort by start so the gaps between them are well-formed
+    // (`ordered` is a stack SmallVec for the common single-range case).
+    let mut ordered: MergeByteRanges = touched_ranges.iter().copied().collect();
+    ordered.sort_unstable_by_key(|range| range.start);
+    let mut cursor = 0usize;
+    for range in &ordered {
+        if staged[cursor..range.start] != base[cursor..range.start] {
+            warn!(
+                target: "ffs::mvcc::merge",
+                proof_variant = %variant,
+                range_count = touched_ranges.len(),
+                "merge_proof_rejected: staged block modified bytes outside declared touched_ranges"
+            );
+            return None;
+        }
+        cursor = range.end();
+    }
+    if staged[cursor..] != base[cursor..] {
         warn!(
             target: "ffs::mvcc::merge",
             proof_variant = %variant,
@@ -5092,6 +5112,45 @@ mod tests {
         latest_conflict[0..4].copy_from_slice(&[5, 5, 5, 5]);
         assert!(
             merge_non_overlapping_ranges(&[r(0, 4)], &base, &latest_conflict, &staged, &proof)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn merge_non_overlapping_ranges_handles_multiple_unsorted_ranges() {
+        let r = MergeByteRange::new;
+        let proof = MergeProof::default();
+        // 16-byte block; staged touches two declared ranges given OUT OF ORDER
+        // ([8,12) then [0,4)) — exercises the complement-gap sort path.
+        let base = vec![0_u8; 16];
+        let mut latest = base.clone();
+        latest[4..8].copy_from_slice(&[7, 7, 7, 7]); // latest touches a gap range
+        let mut staged = base.clone();
+        staged[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        staged[8..12].copy_from_slice(&[5, 6, 7, 8]);
+
+        let merged =
+            merge_non_overlapping_ranges(&[r(8, 4), r(0, 4)], &base, &latest, &staged, &proof)
+                .expect("two disjoint declared ranges merge");
+        let mut expect = base.clone();
+        expect[0..4].copy_from_slice(&[1, 2, 3, 4]);
+        expect[4..8].copy_from_slice(&[7, 7, 7, 7]);
+        expect[8..12].copy_from_slice(&[5, 6, 7, 8]);
+        assert_eq!(merged, expect);
+
+        // A byte modified in a complement gap BETWEEN two declared ranges is
+        // caught (staged touched byte 6, outside both declared ranges).
+        let mut sneaky = staged.clone();
+        sneaky[6] = 42;
+        assert!(
+            merge_non_overlapping_ranges(&[r(8, 4), r(0, 4)], &base, &latest, &sneaky, &proof)
+                .is_none()
+        );
+        // A byte modified in the trailing complement (after the last range) is caught.
+        let mut trailing = staged.clone();
+        trailing[15] = 99;
+        assert!(
+            merge_non_overlapping_ranges(&[r(8, 4), r(0, 4)], &base, &latest, &trailing, &proof)
                 .is_none()
         );
     }

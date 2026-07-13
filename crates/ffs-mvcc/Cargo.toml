@@ -76,3 +76,7 @@ workspace = true
 [[bench]]
 name = "zstd_decompress_reuse"
 harness = false
+
+[[bench]]
+name = "merge_range_overlay"
+harness = false
