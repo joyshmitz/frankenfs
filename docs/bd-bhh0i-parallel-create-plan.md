@@ -752,6 +752,30 @@ workload too; the 1t floor is higher (~97k) — the cutover must NOT regress 1t 
 turning scaling positive. Baseline is now robust across burst (3k) and realistic (20k)
 sizes.
 
+**⭐ KERNEL TARGET measured (the A/B "vs kernel" the plan called for).** Same 20000-file
+workload on a real kernel ext4 (`mke2fs` image + `sudo mount -o loop`, both dcg-allowed),
+parallel-create via a multiprocessing harness (N procs, each in its own subdir, sync at
+end — matches create-bench's model):
+
+| threads | FrankenFS (single-lock) | kernel ext4 | winner |
+|--------:|------------------------:|------------:|:------:|
+| 1  | 97,440 c/s | 31,998 c/s  | **FrankenFS 3.0x** |
+| 8  | 53,358 c/s | 123,204 c/s | kernel 2.3x |
+| 16 | 46,763 c/s | 159,823 c/s | kernel 3.4x |
+| scaling (16t/1t) | **0.48x (NEG)** | **5.0x (POS)** | — |
+
+TWO structural facts, now measured: (1) **FrankenFS wins single-thread 3.0x** (in-process
+create, no per-op syscall — the campaign's structural edge); (2) **kernel scales positively
+(5.0x), FrankenFS negatively (0.48x)** → the kernel overtakes at ~2-4 threads and is 3.4x
+faster at 16t. That crossover IS bd-bhh0i. Positive scaling is provably achievable (the
+kernel does it); the sharded cutover's goal is to flip FrankenFS from 0.48x to positive so
+it DOMINATES at every thread count (starting from the higher 97k 1t base, matching the
+kernel's ~5x would give ~490k@16t ≫ kernel's 160k). CAVEAT (honest): the kernel absolute
+numbers include Python-multiprocessing per-create overhead, so they are a LOWER bound on
+raw kernel throughput (a C harness would show the kernel faster, widening the parallel gap);
+the SCALING SHAPE (positive 5x vs negative 0.48x) and the crossover conclusion are robust to
+that overhead.
+
 This is the firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
 (≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
 runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
