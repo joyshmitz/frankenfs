@@ -17582,6 +17582,24 @@ impl OpenFs {
         ffs_inode::write_inode_at(cx, dev, loc, inode_size, ino, inode, csum_seed)
     }
 
+    /// Allocate one new directory block via the sharded (no-write-lock) path
+    /// (bd-bhh0i cutover slice 7b) — the growth primitive the sharded
+    /// `add_dir_entry` reconstruction uses when an htree leaf splits, a linear
+    /// dir spills, or a dir converts to htree. Thin wrapper over
+    /// [`Self::ext4_sharded_alloc_blocks`] returning the first (only) block;
+    /// `Ok(None)` = no free block.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    fn ext4_sharded_alloc_dir_block(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        hint: &ffs_alloc::AllocHint,
+    ) -> Result<Option<BlockNumber>, FfsError> {
+        Ok(self
+            .ext4_sharded_alloc_blocks(cx, dev, hint, 1)?
+            .map(|alloc| alloc.start))
+    }
+
     /// Require the ext4 alloc state to be present (i.e., writes enabled).
     fn require_alloc_state(&self) -> Result<&RwLock<Ext4AllocState>, FfsError> {
         if self.ext4_forced_read_only.load(Ordering::SeqCst) {
@@ -61911,6 +61929,44 @@ mod tests {
             .total_free()
             .blocks;
         assert_eq!(total_before, total_after, "an inode write must not allocate");
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_alloc_dir_block_grows_bd_bhh0i() {
+        // The dir-growth primitive returns a distinct block per call and debits
+        // total_free().blocks by one.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let hint = AllocHint::default();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        let mut blocks = Vec::new();
+        for call in 0..3 {
+            let blk = fs
+                .ext4_sharded_alloc_dir_block(&cx, &dev, &hint)
+                .unwrap_or_else(|e| panic!("dir-block grow {call} errored: {e:?}"))
+                .unwrap_or_else(|| panic!("dir-block grow {call} found no free block"));
+            blocks.push(blk.0);
+        }
+        let mut sorted = blocks.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), blocks.len(), "dir-block grows returned duplicates");
+        let total_after = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(total_after, total_before - 3, "three dir blocks must be debited");
     }
 
     // ── Extended write-path edge-case hardening ──────────────────────
