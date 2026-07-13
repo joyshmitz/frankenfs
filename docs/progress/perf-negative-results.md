@@ -13,6 +13,48 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `active_snapshots` atomic-refcount (de-serialize per-write register/release) - 2026-07-13 (REJECT)
+
+Status: REJECT / REFUTED BY DE-RISKING A/B (before any production change).
+
+After reads stopped pinning (0576bb8b), the remaining `active_snapshots`
+contention is the per-WRITE `register_snapshot`+`release_snapshot`, which take the
+store's single `RwLock<BTreeMap>` WRITE lock. Proposed: keep `write()` only to
+INSERT a new key, use a shared `read()` lock + an `AtomicU64` value to bump an
+EXISTING key's refcount, so concurrent ops at the same snapshot don't serialize.
+Because a naive impl is fiddly (bool-return semantics, `fetch_sub` underflow on
+double-release, remove-when-zero race) it would be a Loom-gated multi-turn effort
+— so it was PROTOTYPE-BENCHED first (`benches/active_snapshots_refcount`, faithful
+current-vs-atomic impls, N threads, shared-key AND distinct-key extremes).
+
+Result (same worker, 100k register/release pairs per thread):
+
+| case          | threads | current write-lock | atomic read-fastpath | delta        |
+|---------------|---------|--------------------|----------------------|--------------|
+| shared_key    | 1       | 6.93 ms            | 4.39 ms              | 1.58x faster |
+| shared_key    | 2       | 14.44 ms           | 20.20 ms             | 1.40x SLOWER |
+| shared_key    | 4       | 42.07 ms           | 56.76 ms             | 1.35x SLOWER |
+| shared_key    | 8       | 133.9 ms           | 137.4 ms             | ~neutral     |
+| distinct_keys | 1       | 6.48 ms            | 4.33 ms              | 1.50x faster |
+| distinct_keys | 2       | 17.11 ms           | 20.07 ms             | 1.17x SLOWER |
+| distinct_keys | 4       | 42.32 ms           | 37.13 ms             | 1.14x faster |
+| distinct_keys | 8       | 76.92 ms           | 116.5 ms             | 1.51x SLOWER |
+
+The atomic version is faster ONLY single-threaded (a lighter uncontended path);
+under the contention it was meant to fix it is NEUTRAL-TO-SLOWER. Why: the write
+lock's critical section is a tiny `BTreeMap` entry op that serializes CHEAPLY,
+whereas the atomic-refcount adds read-lock acquisition PLUS all threads hammering
+ONE `AtomicU64` (shared key) — a single hot cache line RMW-serializes via
+coherence anyway, with MORE total traffic. So swapping the write lock for a shared
+read-lock + one hot atomic does not help; the `active_snapshots` write lock is not
+improvable this way. De-risking the design first saved a multi-turn Loom effort
+that would have shipped a parallel regression.
+
+Retry predicate: only a design that avoids BOTH the lock AND a single hot atomic —
+e.g. sharded / per-CPU refcount cells summed lazily for the watermark — could beat
+the write lock; re-attempt ONLY with such a design AND a bench beating current at
+2-8 threads. Plain atomic-per-key: do not re-attempt.
+
 ## `mvcc-commit` wait-free fetch_add for commit-seq / txn-id allocators - 2026-07-13 (REJECT)
 
 Status: REJECT / UNSOUND-PURE + END-TO-END-NEGLIGIBLE-GUARDED.

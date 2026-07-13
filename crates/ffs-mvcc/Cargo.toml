@@ -92,3 +92,7 @@ harness = false
 [[bench]]
 name = "active_snapshots_lock"
 harness = false
+
+[[bench]]
+name = "active_snapshots_refcount"
+harness = false
