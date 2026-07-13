@@ -16,7 +16,7 @@
 //! `byte_reparse` re-parses every visited node each pass; `parsed_cached` parses
 //! each node once and reuses it.
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
     BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
     BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch, BtrfsParsedNode, BtrfsStripe,
@@ -439,5 +439,53 @@ fn bench_parsed_node_cache(c: &mut Criterion) {
     data.bench_narrow_range(c);
 }
 
-criterion_group!(parsed_node_cache, bench_parsed_node_cache);
+fn bench_leaf_cache_admission(c: &mut Criterion) {
+    let mut blocks = build_tree();
+    let template = blocks
+        .remove(&0x2_0000)
+        .expect("first leaf must be present");
+
+    let control_input = template.clone();
+    let control_input_ptr = control_input.as_ptr();
+    let control = Arc::<[u8]>::from(control_input.as_slice());
+    assert_eq!(&*control, template.as_slice());
+    assert_ne!(control_input_ptr, control.as_ptr());
+
+    let candidate_input = template.clone();
+    let candidate_input_ptr = candidate_input.as_ptr();
+    let candidate = Arc::new(candidate_input);
+    assert_eq!(candidate.as_slice(), template.as_slice());
+    assert_eq!(candidate_input_ptr, candidate.as_ptr());
+
+    let mut group = c.benchmark_group("btrfs_parsed_leaf_cache_admit_16k");
+    group.sample_size(30);
+    group.bench_function("copy_control_a", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |owned| black_box(Arc::<[u8]>::from(owned.as_slice())),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("copy_control_b", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |owned| black_box(Arc::<[u8]>::from(owned.as_slice())),
+            BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("retain_vec", |b| {
+        b.iter_batched(
+            || template.clone(),
+            |owned| black_box(Arc::new(owned)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
+criterion_group!(
+    parsed_node_cache,
+    bench_parsed_node_cache,
+    bench_leaf_cache_admission
+);
 criterion_main!(parsed_node_cache);

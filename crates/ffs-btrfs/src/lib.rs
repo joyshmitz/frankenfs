@@ -72,7 +72,7 @@ impl BtrfsLeafItemRef {
 /// payload into a per-entry `Vec<u8>`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BtrfsLeafEntryBatch {
-    block: Arc<[u8]>,
+    block: Arc<Vec<u8>>,
     pub entries: Vec<BtrfsLeafItemRef>,
 }
 
@@ -2031,7 +2031,7 @@ fn validate_inline_extent_ram_bytes(
 pub enum BtrfsParsedNode {
     /// A level-0 node: the verified block bytes plus its parsed item index.
     Leaf {
-        block: Arc<[u8]>,
+        block: Arc<Vec<u8>>,
         items: Vec<BtrfsItem>,
     },
     /// An internal node: its parsed key-pointers (key = child subtree minimum).
@@ -2054,6 +2054,51 @@ pub fn parse_btrfs_tree_node(
     logical: u64,
     nodesize: u32,
 ) -> Result<BtrfsParsedNode, ParseError> {
+    match parse_btrfs_tree_node_parts(block, csum_type, logical, nodesize)? {
+        ParsedBtrfsTreeNodeParts::Leaf(items) => Ok(BtrfsParsedNode::Leaf {
+            block: Arc::new(block.to_vec()),
+            items,
+        }),
+        ParsedBtrfsTreeNodeParts::Internal(ptrs) => Ok(BtrfsParsedNode::Internal { ptrs }),
+    }
+}
+
+/// Verify and parse an owned btrfs tree block, retaining its allocation when
+/// the block is a leaf.
+///
+/// This is equivalent to [`parse_btrfs_tree_node`], but callers that already
+/// own their read buffer avoid copying the full leaf into cache storage.
+/// Internal nodes retain only their parsed key pointers and drop the buffer.
+///
+/// # Errors
+/// Returns the same [`ParseError`] as [`parse_btrfs_tree_node`] for the same
+/// bytes, checksum type, logical address, and node size.
+pub fn parse_btrfs_tree_node_owned(
+    block: Vec<u8>,
+    csum_type: u16,
+    logical: u64,
+    nodesize: u32,
+) -> Result<BtrfsParsedNode, ParseError> {
+    match parse_btrfs_tree_node_parts(&block, csum_type, logical, nodesize)? {
+        ParsedBtrfsTreeNodeParts::Leaf(items) => Ok(BtrfsParsedNode::Leaf {
+            block: Arc::new(block),
+            items,
+        }),
+        ParsedBtrfsTreeNodeParts::Internal(ptrs) => Ok(BtrfsParsedNode::Internal { ptrs }),
+    }
+}
+
+enum ParsedBtrfsTreeNodeParts {
+    Leaf(Vec<BtrfsItem>),
+    Internal(Vec<BtrfsKeyPtr>),
+}
+
+fn parse_btrfs_tree_node_parts(
+    block: &[u8],
+    csum_type: u16,
+    logical: u64,
+    nodesize: u32,
+) -> Result<ParsedBtrfsTreeNodeParts, ParseError> {
     let ns = usize::try_from(nodesize)
         .map_err(|_| ParseError::IntegerConversion { field: "nodesize" })?;
     if block.len() != ns {
@@ -2068,13 +2113,10 @@ pub fn parse_btrfs_tree_node(
     header.validate(block.len(), Some(logical))?;
     if header.level == 0 {
         let (_, items) = parse_leaf_items(block)?;
-        Ok(BtrfsParsedNode::Leaf {
-            block: Arc::from(block),
-            items,
-        })
+        Ok(ParsedBtrfsTreeNodeParts::Leaf(items))
     } else {
         let (_, ptrs) = parse_internal_items(block)?;
-        Ok(BtrfsParsedNode::Internal { ptrs })
+        Ok(ParsedBtrfsTreeNodeParts::Internal(ptrs))
     }
 }
 
@@ -2096,8 +2138,8 @@ fn byte_node_provider<'a>(
                 reason: "not covered by any chunk",
             })?;
         let block = read_physical(mapping.physical)?;
-        Ok(Arc::new(parse_btrfs_tree_node(
-            &block, csum_type, logical, nodesize,
+        Ok(Arc::new(parse_btrfs_tree_node_owned(
+            block, csum_type, logical, nodesize,
         )?))
     }
 }
@@ -2755,7 +2797,7 @@ impl BtrfsBorrowedTreeWalker<'_> {
 }
 
 fn collect_leaf_item_batch(
-    block: &Arc<[u8]>,
+    block: &Arc<Vec<u8>>,
     items: &[BtrfsItem],
     out: &mut Vec<BtrfsLeafEntryBatch>,
     range: Option<&(BtrfsKey, BtrfsKey)>,
@@ -10530,6 +10572,61 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn parse_btrfs_tree_node_owned_reuses_leaf_buffer_bd_5koeh() {
+        let oids: Vec<u64> = vec![100, 200, 300, 400, 500, 600, 700, 800];
+        let (blocks, root_logical) = build_two_level_tree(&oids);
+
+        for (&logical, bytes) in &blocks {
+            let borrowed = parse_btrfs_tree_node(bytes, 0, logical, NODESIZE).expect("borrowed");
+            let owned_bytes = bytes.clone();
+            let owned_ptr = owned_bytes.as_ptr();
+            let owned =
+                parse_btrfs_tree_node_owned(owned_bytes, 0, logical, NODESIZE).expect("owned");
+
+            match (borrowed, owned) {
+                (
+                    BtrfsParsedNode::Leaf {
+                        block: borrowed_block,
+                        items: borrowed_items,
+                    },
+                    BtrfsParsedNode::Leaf {
+                        block: owned_block,
+                        items: owned_items,
+                    },
+                ) => {
+                    assert_eq!(borrowed_items, owned_items);
+                    assert_eq!(borrowed_block.as_slice(), owned_block.as_slice());
+                    assert_eq!(owned_ptr, owned_block.as_ptr());
+                }
+                (
+                    BtrfsParsedNode::Internal {
+                        ptrs: borrowed_ptrs,
+                    },
+                    BtrfsParsedNode::Internal { ptrs: owned_ptrs },
+                ) => assert_eq!(borrowed_ptrs, owned_ptrs),
+                _ => panic!("borrowed and owned parsers disagreed on node level"),
+            }
+        }
+
+        let (&leaf_logical, leaf_bytes) = blocks
+            .iter()
+            .find(|(logical, _)| **logical != root_logical)
+            .expect("leaf");
+        let mut truncated = leaf_bytes.clone();
+        truncated.pop();
+        assert_eq!(
+            parse_btrfs_tree_node(&truncated, 0, leaf_logical, NODESIZE).unwrap_err(),
+            parse_btrfs_tree_node_owned(truncated, 0, leaf_logical, NODESIZE).unwrap_err()
+        );
+        let mut corrupt = leaf_bytes.clone();
+        corrupt[BTRFS_HEADER_SIZE + BTRFS_ITEM_SIZE] ^= 0x80;
+        assert_eq!(
+            parse_btrfs_tree_node(&corrupt, 0, leaf_logical, NODESIZE).unwrap_err(),
+            parse_btrfs_tree_node_owned(corrupt, 0, leaf_logical, NODESIZE).unwrap_err()
+        );
     }
 
     #[test]

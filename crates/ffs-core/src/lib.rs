@@ -50,11 +50,10 @@ use ffs_btrfs::{
     BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsParsedNode, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
     enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
-    lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node, parse_dir_items,
+    lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node_owned, parse_dir_items,
     parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_item_names,
-    parse_xattr_items, walk_chunk_tree,
-    walk_tree, walk_tree_floor_with_nodes, walk_tree_parallel_with_nodes,
-    walk_tree_range_parallel_with_nodes,
+    parse_xattr_items, walk_chunk_tree, walk_tree, walk_tree_floor_with_nodes,
+    walk_tree_parallel_with_nodes, walk_tree_range_parallel_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -7486,8 +7485,8 @@ impl OpenFs {
         // Verify + parse ONCE, before the node enters the cache, so every cached
         // node is already-verified — a hit never skips a checksum that was not
         // already checked.
-        let node = Arc::new(parse_btrfs_tree_node(
-            &buf,
+        let node = Arc::new(parse_btrfs_tree_node_owned(
+            buf,
             ctx.csum_type,
             logical,
             nodesize,
