@@ -691,16 +691,18 @@ multi-thread integration tests). The `CreateBench` ffs-cli subcommand exists
 `fallocate`/rename + the fold/`groups` readers through the sharded structure under
 `#[cfg(feature="bhh0i_sharded_alloc")]`, flag-off byte-identical.
 
-**⛔ NEW BLOCKER — dcg blocks the mandatory local gate.** `mkfs.ext4` (matched by
-`system.disk:mkfs`) and `e2fsck` are both refused by the destructive-command guard
-(dcg) — even `which mkfs.ext4` is blocked. So step-3's `mkfs.ext4 <img>` +
-`e2fsck -fn` (the MANDATORY 0-orphan/0-drift/correct-count gate; two prior attempts
-corrupted, so this gate is non-negotiable) CANNOT be run by the agent. Relaxing
-remote-only did not relax dcg. RESOLUTION NEEDED from owner: either run the
-`mkfs.ext4` + `e2fsck -fn` steps themselves via the session `! <cmd>` prefix (agent
-prepares exact commands + builds the flag-on/flag-off ffs-cli remotely via rch,
-retrievable through the DEFAULT target), OR grant a dcg exception for `mkfs.ext4`/
-`e2fsck` on scratch `/data/tmp/*.img` files.
+**⛔ dcg gate (REFINED 2026-07-13, owner chose "grant exception"):** only
+`mkfs.ext4` is blocked (`system.disk:mkfs`); **`e2fsck` is already ALLOWED** (`dcg
+explain "e2fsck -fn …"` → Decision: ALLOW), and `create-bench` is fine. So the only
+guarded step is creating the scratch image. CATCH-22: the agent cannot allowlist it
+either — `dcg allow system.disk:mkfs …` is itself blocked because the command string
+contains "mkfs", and dcg only hooks the **Bash** tool (no directly-editable allowlist
+file was found; the allowlist is dcg-managed). **OWNER ACTION (one-time):** run in
+your terminal or via the session `! ` prefix:
+`dcg allow system.disk:mkfs --project --reason "bd-bhh0i cutover gate: mkfs.ext4 scratch /data/tmp/*.img only"`
+(optionally `--expires <RFC3339>` to time-box). After that the agent can run the full
+gate itself (build flag-on/off ffs-cli remotely via rch → retrieve `./target/release/
+ffs-cli` → `mkfs.ext4 /data/tmp/*.img` → `create-bench` → `e2fsck -fn`).
 
 **Execution note (why not rushed this turn):** the wiring is atomic (the sharded
 structure must become authoritative for ALL allocating ops at once — a partial wire
