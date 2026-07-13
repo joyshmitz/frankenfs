@@ -744,8 +744,15 @@ it just doesn't scale.
 | 8  | 41,427 | 0.60x | clean |
 | 16 | 34,832 | 0.51x | clean |
 
-Per-thread run spread ~2-6% (tight). e2fsck-clean at EVERY thread count. This is the
-firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
+Per-thread run spread ~2-6% (tight). e2fsck-clean at EVERY thread count.
+
+**Realistic workload (count=20000, median of 3, e2fsck-clean):** 1t 97,440 c/s · 8t
+53,358 (0.55x) · 16t 46,763 (0.48x). Negative scaling holds at the steady-state
+workload too; the 1t floor is higher (~97k) — the cutover must NOT regress 1t while
+turning scaling positive. Baseline is now robust across burst (3k) and realistic (20k)
+sizes.
+
+This is the firmed-up A/B floor the sharded-allocator cutover must beat: target 8t ≥ 4x 1t
 (≈ ≥275k c/s off the 68.7k 1t median) with e2fsck still clean. The A/B is now fully
 runnable locally (mke2fs workaround). NEXT (the real remaining work): the ATOMIC cutover
 wiring — it is genuinely atomic (the sharded PerGroupAlloc is cloned from
