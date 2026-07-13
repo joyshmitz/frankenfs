@@ -13,6 +13,47 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `mvcc-commit` skip per-commit contention-metrics global lock under fixed policy - 2026-07-13 (KEEP, 73174f5b)
+
+Status: KEEP / BYTE-IDENTICAL-FOR-DATA / MEASURED WIN (regime-dependent, Pareto).
+
+Every ShardedMvccStore commit took `contention_metrics.write()` — a single GLOBAL
+lock — on the success path to record EMA metrics + `select_policy`. Only
+`ConflictPolicy::Adaptive` reads those metrics (`effective_policy`); production
+runs a FIXED policy (default SafeMerge; ffs-core never calls set_conflict_policy,
+zero readers of contention_metrics). So under a fixed policy that global lock is
+pure unread telemetry that serializes every otherwise-disjoint parallel commit
+across all shards — the "drop unread per-op telemetry on the production path"
+lever class (cf. writeback 9bd37150), here a global-lock-per-commit. `commit_policy()`
+resolves effective policy AND whether metrics are live (Adaptive only) in one
+conflict_policy read; `preflight_fcw_locked` gates all three `contention_metrics.
+write()` sites on it. Adaptive unchanged; fixed-policy commits skip the lock.
+
+Parallel A/B (`benches/commit_metrics_lock`, N threads x 2000 disjoint-block
+single-block commits, SafeMerge; `force_metrics_on` reproduces pre-gate via the
+doc-hidden `set_force_metrics_record` knob vs `gated_off` = production, same worker):
+
+| threads | force_metrics_on | gated_off | delta |
+|---------|------------------|-----------|-------|
+| 2       | 15.31 ms         | 7.54 ms   | 2.03x (CIs separated: on>=12.6, off<=8.4) |
+| 4       | 18.14 ms         | 17.48 ms  | ~neutral (1.04x, CIs overlap) |
+| 8       | 52.99 ms         | 51.36 ms  | ~neutral (1.03x, CIs overlap) |
+
+Honest read: clean 2.03x at 2 threads; converges to neutral at 4/8 threads where
+OTHER serialization becomes binding (the publication-gate commit ordering + shard-
+index collisions across the disjoint block ranges — both present identically in
+both arms, so they cancel in the ratio but dominate absolute time and mask the
+metrics-lock delta once they saturate). Pareto: gated_off <= force_on at every
+thread count (never a regression), 2x at low-moderate parallelism. Byte-identical
+for data: install paths, conflict detection, merge all unchanged; only the unread
+telemetry counters stop updating under fixed policy. ffs-mvcc 484 lib (incl. new
+`fixed_policy_skips_contention_metrics_but_force_records`) + all integration green.
+
+NEXT SERIALIZATION LEVERS (exposed by the 4/8-thread flatness): (a) the
+`CommitPublicationGate` commit ordering — inherently serializes the publish step;
+(b) `next_commit` AtomicU64 / shard-index collisions among concurrent commits.
+These are the remaining global bottlenecks on the parallel-create scaling surface.
+
 ## `mvcc-merge` FCW preflight validates without building the merged block - 2026-07-13 (KEEP, 60962fa1)
 
 Status: KEEP / BYTE-IDENTICAL / MEASURED WIN.
