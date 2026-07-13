@@ -793,6 +793,102 @@ impl DirAllocBackend for ShardedDirAlloc<'_> {
     }
 }
 
+/// A [`ffs_btree::BlockAllocator`] that allocates external extent-tree node blocks
+/// through the sharded per-group allocator (bd-bhh0i) instead of the single-lock
+/// `&mut [GroupStats]` the single-lock [`ffs_extent::GroupBlockAllocator`] holds.
+///
+/// The directory-GROWTH helpers allocate their extent-tree meta blocks by handing
+/// a `&mut dyn BlockAllocator` to `ffs_btree::insert`. On the single-lock path that
+/// is a `GroupBlockAllocator { groups: &mut alloc.groups, .. }`, which forces the
+/// growth helper to keep the `&mut Ext4AllocState` borrow — the reason the growth
+/// path is all-or-nothing. Routing `insert` through THIS allocator (which borrows
+/// only `&OpenFs` and locks groups internally) lets a sharded growth helper drop
+/// that single-lock borrow entirely, so `dir_alloc_blocks`/`dir_write_inode` AND
+/// the tree-node allocs all go through the sharded structure together.
+///
+/// `alloc_block`/`free_block` mirror `GroupBlockAllocator` exactly (single-block,
+/// contiguity hint advance) but via [`OpenFs::ext4_sharded_alloc_blocks`] /
+/// [`OpenFs::ext4_sharded_free_blocks`]; `finalize_node` stamps the identical
+/// `metadata_csum` extent-block CRC32C tail (keyed on the fs seed + owning inode
+/// number/generation). The csum key is snapshotted lock-free at construction from
+/// the immutable superblock, so external nodes are checksummed byte-identically to
+/// the single-lock path.
+#[cfg(feature = "bhh0i_sharded_alloc")]
+#[allow(dead_code)] // constructed by the sharded growth path in a later bd-bhh0i slice.
+struct ShardedTreeBlockAllocator<'a> {
+    fs: &'a OpenFs,
+    dev: &'a dyn ffs_block::BlockDevice,
+    /// Placement hint; advanced after each alloc to prefer contiguous nodes.
+    hint: ffs_alloc::AllocHint,
+    /// Owning inode number — first key for the external extent-block CRC32C tail.
+    ino: u32,
+    /// Owning inode `i_generation` — second key for the CRC32C tail.
+    generation: u32,
+    has_metadata_csum: bool,
+    csum_seed: u32,
+}
+
+#[cfg(feature = "bhh0i_sharded_alloc")]
+#[allow(dead_code)] // `new` is called by the sharded growth path in a later slice.
+impl<'a> ShardedTreeBlockAllocator<'a> {
+    /// Build a sharded extent-tree-node allocator for inode `ino`/`generation`.
+    /// The `metadata_csum` key (`has_metadata_csum` + `csum_seed`) is snapshotted
+    /// lock-free from the immutable superblock, so `finalize_node` stamps external
+    /// nodes exactly like the single-lock `GroupBlockAllocator`. `None` if this is
+    /// not an ext4 filesystem / the persist ctx is unavailable.
+    fn new(
+        fs: &'a OpenFs,
+        dev: &'a dyn ffs_block::BlockDevice,
+        hint: ffs_alloc::AllocHint,
+        ino: u32,
+        generation: u32,
+    ) -> Option<Self> {
+        let pctx = fs.ext4_persist_ctx_lockfree()?;
+        Some(Self {
+            fs,
+            dev,
+            hint,
+            ino,
+            generation,
+            has_metadata_csum: pctx.has_metadata_csum,
+            csum_seed: pctx.csum_seed,
+        })
+    }
+}
+
+#[cfg(feature = "bhh0i_sharded_alloc")]
+impl ffs_btree::BlockAllocator for ShardedTreeBlockAllocator<'_> {
+    fn alloc_block(&mut self, cx: &Cx) -> Result<BlockNumber, FfsError> {
+        let alloc = self
+            .fs
+            .ext4_sharded_alloc_blocks(cx, self.dev, &self.hint, 1)?
+            .ok_or(FfsError::NoSpace)?;
+        // Prefer contiguous placement for the next node, mirroring
+        // `GroupBlockAllocator::alloc_block`.
+        self.hint.goal_block = alloc.start.0.checked_add(1).map(BlockNumber);
+        Ok(alloc.start)
+    }
+
+    fn free_block(&mut self, cx: &Cx, block: BlockNumber) -> Result<(), FfsError> {
+        self.fs.ext4_sharded_free_blocks(cx, self.dev, block, 1)
+    }
+
+    fn finalize_node(&self, block: &mut [u8]) {
+        // External extent-tree nodes carry the metadata_csum CRC32C tail keyed on
+        // the fs csum seed + owning inode number/generation, exactly as
+        // `GroupBlockAllocator::finalize_node` stamps them (the inode `i_block`
+        // root is covered by the inode checksum and never reaches this hook).
+        if self.has_metadata_csum {
+            ffs_ondisk::ext4::stamp_extent_block_checksum(
+                block,
+                self.csum_seed,
+                self.ino,
+                self.generation,
+            );
+        }
+    }
+}
+
 /// Mutable btrfs allocation state for write operations.
 ///
 /// Mirrors `Ext4AllocState` for the btrfs path: an in-memory COW tree that
@@ -61984,6 +62080,94 @@ mod tests {
             realloc.start,
             allocated
         );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn sharded_tree_block_allocator_round_trips_bd_bhh0i() {
+        // The extent-tree-node allocator drives ffs_btree::insert's BlockAllocator
+        // trait through the sharded path. alloc_block must hand distinct blocks and
+        // advance the contiguity hint; free_block must restore the free count —
+        // proving the trait routes to ext4_sharded_alloc_blocks/free_blocks.
+        use ffs_btree::BlockAllocator;
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let cx = Cx::for_testing();
+        let dev = fs.block_device_adapter();
+        let total_before = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present under feature")
+            .total_free()
+            .blocks;
+
+        let mut ta = ShardedTreeBlockAllocator::new(&fs, &dev, AllocHint::default(), 12, 7)
+            .expect("tree allocator builds on an ext4 fs");
+
+        let b0 = ta.alloc_block(&cx).expect("first tree-node alloc");
+        let b1 = ta.alloc_block(&cx).expect("second tree-node alloc");
+        assert_ne!(b0, b1, "tree-node allocs must be distinct blocks");
+        assert_eq!(
+            ta.hint.goal_block,
+            b1.0.checked_add(1).map(BlockNumber),
+            "the contiguity hint must advance past the last allocated block"
+        );
+        let after_alloc = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            after_alloc,
+            total_before - 2,
+            "2 tree-node allocs must debit total_free by 2"
+        );
+
+        ta.free_block(&cx, b0).expect("free first tree node");
+        ta.free_block(&cx, b1).expect("free second tree node");
+        let after_free = fs
+            .ext4_sharded_alloc
+            .as_ref()
+            .expect("sharded allocator present")
+            .total_free()
+            .blocks;
+        assert_eq!(
+            after_free, total_before,
+            "trait free_block must restore total_free to the pre-alloc value"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn sharded_tree_block_allocator_finalize_node_matches_direct_stamp_bd_bhh0i() {
+        // finalize_node must stamp an external extent node EXACTLY like a direct
+        // stamp_extent_block_checksum with the same (seed, ino, generation) key
+        // (proving the key is threaded through) — and be a no-op on a non-csum fs.
+        use ffs_btree::BlockAllocator;
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let dev = fs.block_device_adapter();
+        let ta = ShardedTreeBlockAllocator::new(&fs, &dev, AllocHint::default(), 42, 99)
+            .expect("tree allocator builds on an ext4 fs");
+
+        let mut got = vec![0u8; 4096];
+        let mut want = got.clone();
+        ta.finalize_node(&mut got);
+        if ta.has_metadata_csum {
+            ffs_ondisk::ext4::stamp_extent_block_checksum(&mut want, ta.csum_seed, 42, 99);
+            assert_eq!(
+                got, want,
+                "finalize_node must stamp identically to a direct keyed stamp"
+            );
+        } else {
+            assert_eq!(
+                got, want,
+                "no-csum fs: finalize_node must leave the block unchanged"
+            );
+        }
     }
 
     #[cfg(feature = "bhh0i_sharded_alloc")]
