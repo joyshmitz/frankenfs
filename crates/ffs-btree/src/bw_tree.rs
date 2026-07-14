@@ -970,7 +970,7 @@ fn range_scan_from_head(
     count: usize,
 ) -> Result<(Vec<(BwKey, BwValue)>, usize)> {
     let mut ops: Vec<MaterializeOp> = Vec::new();
-    let mut cursor = Arc::clone(head);
+    let mut cursor = head.as_ref();
     let mut chain_len = 0_usize;
 
     loop {
@@ -984,7 +984,7 @@ fn range_scan_from_head(
             });
         }
 
-        match cursor.as_ref() {
+        match cursor {
             PageDelta::Base { entries } => {
                 let rows = bounded_range_from_base(entries, &ops, start, count);
                 return Ok((rows, chain_len));
@@ -994,11 +994,11 @@ fn range_scan_from_head(
                     key: *key,
                     value: *value,
                 });
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
             PageDelta::Delete { key, next } => {
                 ops.push(MaterializeOp::Delete { key: *key });
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
             PageDelta::Split {
                 separator, next, ..
@@ -1006,18 +1006,18 @@ fn range_scan_from_head(
                 ops.push(MaterializeOp::Split {
                     separator: *separator,
                 });
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
             PageDelta::Merge { next, .. } => {
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
             PageDelta::MessageBuffer { messages, next } => {
                 push_buffered_ops(&mut ops, messages);
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
             PageDelta::AppendRun { entries, next } => {
                 push_append_run_ops(&mut ops, entries);
-                cursor = Arc::clone(next);
+                cursor = next.as_ref();
             }
         }
     }

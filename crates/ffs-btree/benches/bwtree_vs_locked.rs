@@ -1018,6 +1018,86 @@ fn bench_range_shadow_insert_fusion_ab(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Scenario 10: Range-scan delta-chain traversal A/A/B ──────────────
+//
+// The controls freeze the former range-scan walk, which clones and drops an
+// Arc at every link. The candidate borrows each next link from the immutable
+// head snapshot. Both arms inspect the same chain shape and return its length;
+// range replay and result construction are intentionally outside this ratio.
+
+fn range_chain_walk_fixture(delta_count: u64) -> Arc<PageDelta> {
+    let mut head = Arc::new(PageDelta::Base {
+        entries: BTreeMap::new(),
+    });
+    for key in 0..delta_count {
+        head = Arc::new(PageDelta::Insert {
+            key: BwKey(key),
+            value: BwValue(key.wrapping_mul(17)),
+            next: head,
+        });
+    }
+    head
+}
+
+fn range_chain_walk_cloned(head: &Arc<PageDelta>) -> usize {
+    let mut cursor = Arc::clone(head);
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len += 1;
+        match cursor.as_ref() {
+            PageDelta::Base { .. } => return chain_len,
+            PageDelta::Insert { next, .. }
+            | PageDelta::Delete { next, .. }
+            | PageDelta::Split { next, .. }
+            | PageDelta::Merge { next, .. }
+            | PageDelta::MessageBuffer { next, .. }
+            | PageDelta::AppendRun { next, .. } => cursor = Arc::clone(next),
+        }
+    }
+}
+
+fn range_chain_walk_borrowed(head: &Arc<PageDelta>) -> usize {
+    let mut cursor = head.as_ref();
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len += 1;
+        match cursor {
+            PageDelta::Base { .. } => return chain_len,
+            PageDelta::Insert { next, .. }
+            | PageDelta::Delete { next, .. }
+            | PageDelta::Split { next, .. }
+            | PageDelta::Merge { next, .. }
+            | PageDelta::MessageBuffer { next, .. }
+            | PageDelta::AppendRun { next, .. } => cursor = next.as_ref(),
+        }
+    }
+}
+
+fn bench_range_chain_walk_ab(c: &mut Criterion) {
+    let head = range_chain_walk_fixture(256);
+    assert_eq!(range_chain_walk_cloned(&head), 257);
+    assert_eq!(range_chain_walk_borrowed(&head), 257);
+
+    let mut group = c.benchmark_group("bwtree_range_chain_walk_256_deltas");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    for control in ["arc_clone_control_a", "arc_clone_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| std::hint::black_box(range_chain_walk_cloned(std::hint::black_box(&head))))
+        });
+    }
+
+    group.bench_function("borrowed_candidate", |b| {
+        b.iter(|| std::hint::black_box(range_chain_walk_borrowed(std::hint::black_box(&head))))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_heavy,
@@ -1030,5 +1110,6 @@ criterion_group!(
     bench_split_materialize_tail_ab,
     bench_range_delta_top_k_ab,
     bench_range_shadow_insert_fusion_ab,
+    bench_range_chain_walk_ab,
 );
 criterion_main!(benches);
