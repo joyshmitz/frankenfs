@@ -140,12 +140,7 @@ pub fn write_inode_at(
         heap_buf = vec![0u8; inode_size];
         &mut heap_buf
     };
-    serialize_inode_into(inode, inode_size, raw);
-
-    // Compute and write checksum.
-    #[expect(clippy::cast_possible_truncation)]
-    let ino32 = ino.0 as u32;
-    compute_and_set_checksum(raw, csum_seed, ino32);
+    serialize_inode_with_checksum(inode, inode_size, ino, csum_seed, raw);
 
     // Read the block, patch the inode bytes IN PLACE, write back. `make_mut` is
     // COW (`Arc::make_mut`): when the freshly-read block is uniquely owned it hands
@@ -166,6 +161,27 @@ pub fn write_inode_at(
     dev.write_block(cx, loc.block, buf.as_slice())?;
 
     Ok(())
+}
+
+/// Serialize `inode` into `buf` (`buf.len()` must be `inode_size`) AND stamp its
+/// CRC32C checksum — i.e. the exact bytes `write_inode` lands in the inode's slot,
+/// with NO device I/O. Exposed so the transactional ext4 create/write path in
+/// ffs-core can build the patched inode-table block itself and stage it with a
+/// slot-scoped MVCC merge proof: relaxed first-committer-wins so concurrent creates
+/// writing DISJOINT inode slots of the same 4 KiB table block MERGE instead of
+/// FCW-conflicting — the parallel-create bottleneck the bd-bhh0i cutover hit. The
+/// caller pairs this with `locate_inode` (block + `byte_offset`) to know the slot's
+/// `[byte_offset, byte_offset + inode_size)` range for the proof.
+#[expect(clippy::cast_possible_truncation)]
+pub fn serialize_inode_with_checksum(
+    inode: &Ext4Inode,
+    inode_size: usize,
+    ino: InodeNumber,
+    csum_seed: u32,
+    buf: &mut [u8],
+) {
+    serialize_inode_into(inode, inode_size, buf);
+    compute_and_set_checksum(buf, csum_seed, ino.0 as u32);
 }
 
 /// Serialize into a caller-provided `buf` (`buf.len()` must be `inode_size`) —
@@ -1272,6 +1288,39 @@ mod tests {
             xattr_ibody: vec![0xAA, 0xBB, 0xCC, 0xDD],
             number: 0,
         }
+    }
+
+    #[test]
+    fn serialize_inode_with_checksum_matches_write_and_round_trips() {
+        // Seam contract (bd-bhh0i merge-proof slice 1): the pure serialize+CRC the
+        // transactional create path in ffs-core will stage under a slot-scoped merge
+        // proof must produce the exact bytes `write_inode_at` lands in the slot.
+        let inode = representative_inode();
+        let inode_size = 256usize;
+        let ino = InodeNumber(11);
+        let seed = 0x1234_5678_u32;
+
+        let mut buf = [0u8; 256];
+        serialize_inode_with_checksum(&inode, inode_size, ino, seed, &mut buf[..inode_size]);
+
+        // It is exactly serialize_inode_into + compute_and_set_checksum (what
+        // write_inode_at now calls), so the block write is byte-identical.
+        let mut expected = [0u8; 256];
+        serialize_inode_into(&inode, inode_size, &mut expected[..inode_size]);
+        compute_and_set_checksum(
+            &mut expected[..inode_size],
+            seed,
+            u32::try_from(ino.0).expect("test ino fits in u32"),
+        );
+        assert_eq!(buf, expected);
+
+        // And the serialized slot parses back to the same inode (core fields).
+        let parsed = Ext4Inode::parse_from_bytes(&buf[..inode_size]).expect("parse serialized inode");
+        assert_eq!(parsed.mode, inode.mode);
+        assert_eq!(parsed.size, inode.size);
+        assert_eq!(parsed.links_count, inode.links_count);
+        assert_eq!(parsed.uid, inode.uid);
+        assert_eq!(parsed.gid, inode.gid);
     }
 
     const REPRESENTATIVE_INODE_GOLDEN: &str = concat!(
