@@ -1044,7 +1044,16 @@ fn bounded_range_from_base(
                     && !shadowed_keys.contains(&key)
                     && key_before_bound(key, base_upper_bound)
                 {
-                    delta_values.insert(key, value);
+                    let should_retain = delta_values.len() < count
+                        || delta_values
+                            .last_key_value()
+                            .is_some_and(|(&largest_key, _)| key < largest_key);
+                    if should_retain {
+                        delta_values.insert(key, value);
+                        if delta_values.len() > count {
+                            let _ = delta_values.pop_last();
+                        }
+                    }
                 }
                 shadowed_keys.insert(key);
             }
@@ -1218,8 +1227,9 @@ mod tests {
     use super::{
         BwKey, BwValue, ConsolidationConfig, DEFAULT_CONSOLIDATION_THRESHOLD,
         DEFAULT_MESSAGE_BUFFER_CAPACITY, DeltaMutation, FfsError, MAX_CAS_RETRIES, MAX_CHAIN_DEPTH,
-        MAX_CHAIN_WALK, MappingTable, PageDelta, PageHead, PageId, chain_length,
-        materialize_from_head, range_scan_from_head, write_lock,
+        MAX_CHAIN_WALK, MappingTable, MaterializeOp, PageDelta, PageHead, PageId, apply_op,
+        bounded_range_from_base, chain_length, materialize_from_head, range_scan_from_head,
+        write_lock,
     };
     use std::collections::BTreeMap;
     use std::sync::{Arc, Barrier, atomic::Ordering};
@@ -2338,6 +2348,52 @@ mod tests {
                 .expect("range scan should succeed"),
             expected
         );
+    }
+
+    #[test]
+    fn bounded_range_top_k_matches_full_materialization() {
+        let entries: BTreeMap<_, _> = (0..1024_u64)
+            .map(|key| (BwKey(key * 2), BwValue(key.wrapping_mul(17))))
+            .collect();
+        let mut chronological_ops = Vec::new();
+        for ordinal in 0..2048_u64 {
+            let key = (ordinal.wrapping_mul(4051)) & 4095;
+            chronological_ops.push(MaterializeOp::Insert {
+                key: BwKey(key),
+                value: BwValue(key.wrapping_mul(31)),
+            });
+        }
+        for key in (0..4096_u64).step_by(37) {
+            chronological_ops.push(MaterializeOp::Delete { key: BwKey(key) });
+        }
+        for key in (0..4096_u64).step_by(101) {
+            chronological_ops.push(MaterializeOp::Insert {
+                key: BwKey(key),
+                value: BwValue(key.wrapping_mul(43)),
+            });
+        }
+
+        let ops: Vec<_> = chronological_ops.into_iter().rev().collect();
+        let mut materialized = entries.clone();
+        for op in ops.iter().rev().copied() {
+            apply_op(&mut materialized, op);
+        }
+
+        for start in [BwKey(0), BwKey(1024), BwKey(4000)] {
+            for count in [0, 1, 16, 128, 4096] {
+                let expected: Vec<_> = materialized
+                    .range(start..)
+                    .take(count)
+                    .map(|(&key, &value)| (key, value))
+                    .collect();
+                assert_eq!(
+                    bounded_range_from_base(&entries, &ops, start, count),
+                    expected,
+                    "start={} count={count}",
+                    start.0
+                );
+            }
+        }
     }
 
     #[test]

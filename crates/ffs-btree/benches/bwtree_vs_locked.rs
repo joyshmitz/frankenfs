@@ -717,6 +717,193 @@ fn bench_split_materialize_tail_ab(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Scenario 8: Bounded range-scan delta candidates A/A/B ─────────────
+//
+// A range scan can return at most `count` rows, so delta inserts larger than
+// the smallest `count` visible delta keys cannot affect its result. The
+// candidate keeps that ordered top-k while retaining every key in the shadow
+// set; the controls freeze the previous unbounded delta-value map.
+
+#[derive(Debug, Clone, Copy)]
+enum RangeReplayOp {
+    Insert { key: BwKey, value: BwValue },
+    Delete { key: BwKey },
+    Split { separator: BwKey },
+}
+
+fn before_range_bound(key: BwKey, bound: Option<BwKey>) -> bool {
+    bound.is_none_or(|bound| key < bound)
+}
+
+fn replay_bounded_range<const RETAIN_TOP_K: bool>(
+    entries: &BTreeMap<BwKey, BwValue>,
+    ops: &[RangeReplayOp],
+    start: BwKey,
+    count: usize,
+) -> Vec<(BwKey, BwValue)> {
+    if count == 0 {
+        return Vec::new();
+    }
+
+    let mut delta_values = BTreeMap::new();
+    let mut shadowed_keys = std::collections::BTreeSet::new();
+    let mut base_upper_bound: Option<BwKey> = None;
+
+    for op in ops {
+        match *op {
+            RangeReplayOp::Insert { key, value } => {
+                if key >= start
+                    && !shadowed_keys.contains(&key)
+                    && before_range_bound(key, base_upper_bound)
+                {
+                    let should_retain = !RETAIN_TOP_K
+                        || delta_values.len() < count
+                        || delta_values
+                            .last_key_value()
+                            .is_some_and(|(&largest_key, _)| key < largest_key);
+                    if should_retain {
+                        delta_values.insert(key, value);
+                        if RETAIN_TOP_K && delta_values.len() > count {
+                            let _ = delta_values.pop_last();
+                        }
+                    }
+                }
+                shadowed_keys.insert(key);
+            }
+            RangeReplayOp::Delete { key } => {
+                shadowed_keys.insert(key);
+            }
+            RangeReplayOp::Split { separator } => {
+                base_upper_bound =
+                    Some(base_upper_bound.map_or(separator, |bound| bound.min(separator)));
+            }
+        }
+    }
+
+    let mut rows = Vec::with_capacity(count);
+    let mut base_iter = entries.range(start..).peekable();
+    let mut delta_iter = delta_values.iter().peekable();
+
+    while rows.len() < count {
+        let next_base = base_iter
+            .peek()
+            .map(|&(&key, &value)| (key, value))
+            .filter(|&(key, _)| before_range_bound(key, base_upper_bound));
+        let next_delta = delta_iter.peek().map(|&(&key, &value)| (key, value));
+
+        match (next_base, next_delta) {
+            (Some((base_key, base_value)), Some((delta_key, delta_value))) => {
+                match base_key.cmp(&delta_key) {
+                    std::cmp::Ordering::Less => {
+                        base_iter.next();
+                        if !shadowed_keys.contains(&base_key) {
+                            rows.push((base_key, base_value));
+                        }
+                    }
+                    std::cmp::Ordering::Greater => {
+                        delta_iter.next();
+                        rows.push((delta_key, delta_value));
+                    }
+                    std::cmp::Ordering::Equal => {
+                        base_iter.next();
+                        delta_iter.next();
+                        rows.push((delta_key, delta_value));
+                    }
+                }
+            }
+            (Some((base_key, base_value)), None) => {
+                base_iter.next();
+                if !shadowed_keys.contains(&base_key) {
+                    rows.push((base_key, base_value));
+                }
+            }
+            (None, Some((delta_key, delta_value))) => {
+                delta_iter.next();
+                rows.push((delta_key, delta_value));
+            }
+            (None, None) => break,
+        }
+    }
+
+    rows
+}
+
+fn range_delta_top_k_fixture() -> (BTreeMap<BwKey, BwValue>, Vec<RangeReplayOp>) {
+    let entries = (0..8192_u64)
+        .map(|key| (BwKey(key * 2), BwValue(key.wrapping_mul(17))))
+        .collect();
+    let ops = (0..8192_u64)
+        .map(|ordinal| {
+            let key = ((ordinal.wrapping_mul(4051)) & 8191) * 2 + 1;
+            RangeReplayOp::Insert {
+                key: BwKey(key),
+                value: BwValue(key.wrapping_mul(31)),
+            }
+        })
+        .collect();
+    (entries, ops)
+}
+
+fn bench_range_delta_top_k_ab(c: &mut Criterion) {
+    let (entries, ops) = range_delta_top_k_fixture();
+    for start in [BwKey(0), BwKey(4096), BwKey(16_000)] {
+        for count in [0, 1, 16, 1024, 8192] {
+            assert_eq!(
+                replay_bounded_range::<true>(&entries, &ops, start, count),
+                replay_bounded_range::<false>(&entries, &ops, start, count),
+                "start={} count={count}",
+                start.0
+            );
+        }
+    }
+
+    let adversarial_entries = (0..32_u64).map(|key| (BwKey(key), BwValue(key))).collect();
+    let adversarial_ops = [
+        RangeReplayOp::Insert {
+            key: BwKey(30),
+            value: BwValue(300),
+        },
+        RangeReplayOp::Delete { key: BwKey(2) },
+        RangeReplayOp::Insert {
+            key: BwKey(30),
+            value: BwValue(30),
+        },
+        RangeReplayOp::Insert {
+            key: BwKey(3),
+            value: BwValue(3000),
+        },
+        RangeReplayOp::Split {
+            separator: BwKey(31),
+        },
+    ];
+    for count in 0..=32 {
+        assert_eq!(
+            replay_bounded_range::<true>(&adversarial_entries, &adversarial_ops, BwKey(0), count,),
+            replay_bounded_range::<false>(&adversarial_entries, &adversarial_ops, BwKey(0), count,),
+            "adversarial count={count}"
+        );
+    }
+
+    let mut group = c.benchmark_group("bwtree_range_delta_topk_8192_ops_count16");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    for control in ["unbounded_control_a", "unbounded_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                std::hint::black_box(replay_bounded_range::<false>(&entries, &ops, BwKey(0), 16))
+            })
+        });
+    }
+
+    group.bench_function("topk_candidate", |b| {
+        b.iter(|| std::hint::black_box(replay_bounded_range::<true>(&entries, &ops, BwKey(0), 16)))
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_heavy,
@@ -727,5 +914,6 @@ criterion_group!(
     bench_consolidation_overhead,
     bench_point_lookup_ab,
     bench_split_materialize_tail_ab,
+    bench_range_delta_top_k_ab,
 );
 criterion_main!(benches);
