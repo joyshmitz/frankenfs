@@ -2290,6 +2290,83 @@ mod tests {
     }
 
     #[test]
+    fn concurrent_disjoint_slot_writes_same_block_all_merge() {
+        // bd-bhh0i slices 2b/4: the shared-metadata merge under REAL concurrency.
+        // N threads each read-modify-write a DISJOINT fixed-size slot of the SAME
+        // block — exactly what `FsMvccBlockDevice::rmw_block` does per sharded
+        // create (an inode-table slot / a GDT descriptor): begin, read at the txn
+        // snapshot, patch one slot, stage under a range-overlay proof, commit. A
+        // barrier makes all N txns begin at the SAME (stale) snapshot, so every
+        // commit but the first takes the concurrent MERGE path. All must commit
+        // (disjoint ranges never truly conflict) and the final block must carry
+        // EVERY thread's slot — a stale-base clobber (the bug the read-at-snapshot
+        // RMW prevents) would leave some slot at its base value. Needs no mke2fs,
+        // so it validates REMOTELY what the local cutover otherwise exercises.
+        fn run_case(proof_of: fn(usize, usize) -> MergeProof) {
+            let store = Arc::new(ShardedMvccStore::new(8));
+            let block = BlockNumber(4242);
+            let block_size = 4096_usize;
+            let slot = 32_usize;
+            let threads = 16_usize;
+            assert!(threads * slot <= block_size);
+
+            let mut seed = store.begin();
+            seed.stage_write(block, vec![0_u8; block_size]);
+            store.commit(seed).expect("seed base version");
+
+            let barrier = Arc::new(std::sync::Barrier::new(threads));
+            let handles: Vec<_> = (0..threads)
+                .map(|i| {
+                    let store = Arc::clone(&store);
+                    let barrier = Arc::clone(&barrier);
+                    std::thread::spawn(move || {
+                        let marker = u8::try_from(i + 1).expect("marker fits u8");
+                        let off = i * slot;
+                        // Begin + read at THIS txn's own snapshot BEFORE the barrier,
+                        // so all txns share the pre-writes snapshot and every commit
+                        // after the first hits the concurrent merge path.
+                        let mut txn = store.begin();
+                        let snap = txn.snapshot();
+                        let mut data = store
+                            .read_visible(block, snap)
+                            .expect("base version visible at snapshot");
+                        data[off..off + slot].fill(marker);
+                        txn.stage_write_with_proof(block, data, proof_of(off, slot));
+                        barrier.wait();
+                        store
+                            .commit(txn)
+                            .expect("disjoint-slot write must merge, not FCW-conflict");
+                    })
+                })
+                .collect();
+            for h in handles {
+                h.join().expect("worker thread panicked");
+            }
+
+            let final_block = store
+                .read_visible(block, store.current_snapshot())
+                .expect("committed version");
+            assert_eq!(final_block.len(), block_size);
+            for i in 0..threads {
+                let marker = u8::try_from(i + 1).expect("marker fits u8");
+                let off = i * slot;
+                assert!(
+                    final_block[off..off + slot].iter().all(|&b| b == marker),
+                    "thread {i}'s slot was clobbered by a concurrent merge: {:?}",
+                    &final_block[off..off + slot]
+                );
+            }
+            for &b in &final_block[threads * slot..] {
+                assert_eq!(b, 0, "bytes outside every written slot must stay at base");
+            }
+        }
+
+        // Both range-overlay proof families the two slices emit.
+        run_case(MergeProof::independent_key_range); // GDT descriptor (slice 4)
+        run_case(MergeProof::timestamp_only_inode_range); // inode-table slot (slice 2b)
+    }
+
+    #[test]
     fn snapshot_reads_consistent_across_shards() {
         let store = ShardedMvccStore::new(4);
 
