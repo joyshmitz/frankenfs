@@ -13,6 +13,21 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Block-cache hasher + per-op timestamp: already optimal / not byte-id-changeable - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — two more per-op hot spots probed, neither a lever.
+
+- `ShardedCache` (every metadata/data/extent-node/group-desc block cache get): already
+  uses `rustc_hash::FxHashMap` (fast non-cryptographic hash — a u64 `BlockNumber` key
+  needs no SipHash), sharded so gets on distinct shards run fully parallel, and the hit
+  path locks only the key's shard + clones the value (`cache_get_rwlock` benched). The
+  obvious "swap SipHash → FxHash" win is already done.
+- `now_timestamp()` (per write/create/mkdir/setattr): a single `SystemTime::now()` =
+  one vDSO `clock_gettime` (~5–10 ns) + arithmetic, called ONCE per op — not redundant.
+  The only cheaper option, `CLOCK_REALTIME_COARSE` (~1 ns), changes the nanosecond
+  timestamps written to disk (ctime/mtime/*_extra) — a SEMANTIC / non-byte-identical
+  change, not a perf lever. Rejected.
+
 ## MVCC version-chain resolution + staged-write lookup: already binary-search/SmallVec - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed the MVCC read/commit hot path (ffs-mvcc, my lane); already
