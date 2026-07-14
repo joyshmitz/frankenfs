@@ -31,6 +31,8 @@ use std::fs;
 use std::hint::black_box;
 #[cfg(feature = "bench-instrumentation")]
 use std::io::Read;
+use std::io::{Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 #[cfg(feature = "bench-instrumentation")]
 use std::process::{Command, Stdio};
 #[cfg(feature = "bench-instrumentation")]
@@ -581,6 +583,85 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
             block_id += 4;
         });
     });
+}
+
+/// Isolate the WAL append syscall primitive: the former seek+write pair versus
+/// the positioned write used by `WalWriter::raw_append`.
+fn bench_wal_positioned_append(c: &mut Criterion) {
+    const RECORD_SIZE: usize = 256;
+    const RECORD_SIZE_U64: u64 = 256;
+    const APPENDS_PER_ITER: u64 = 512;
+    const WINDOW_RECORDS: u64 = 4096;
+    const WINDOW_BYTES: u64 = RECORD_SIZE_U64 * WINDOW_RECORDS;
+
+    let record = (0_u8..=u8::MAX)
+        .map(|index| index.wrapping_mul(31).wrapping_add(7))
+        .collect::<Vec<_>>();
+
+    // Prove both syscall shapes deposit exactly the same bytes before timing.
+    let mut seek_write = tempfile::tempfile().expect("seek+write parity file");
+    let positioned = tempfile::tempfile().expect("positioned parity file");
+    let parity_offset = RECORD_SIZE_U64 * 17;
+    seek_write
+        .seek(SeekFrom::Start(parity_offset))
+        .expect("seek parity offset");
+    seek_write.write_all(&record).expect("seek+write parity");
+    positioned
+        .write_all_at(&record, parity_offset)
+        .expect("positioned parity write");
+    let mut seek_write_bytes = vec![0_u8; RECORD_SIZE];
+    let mut positioned_bytes = vec![0_u8; RECORD_SIZE];
+    seek_write
+        .read_exact_at(&mut seek_write_bytes, parity_offset)
+        .expect("read seek+write parity bytes");
+    positioned
+        .read_exact_at(&mut positioned_bytes, parity_offset)
+        .expect("read positioned parity bytes");
+    assert_eq!(seek_write_bytes, positioned_bytes);
+    assert_eq!(positioned_bytes, record);
+
+    let mut group = c.benchmark_group("wal_raw_append_positioned_256b");
+    group.sample_size(30);
+    group.warm_up_time(std::time::Duration::from_secs(1));
+    group.measurement_time(std::time::Duration::from_secs(3));
+    group.throughput(criterion::Throughput::Elements(APPENDS_PER_ITER));
+
+    for control in ["seek_write_control_a", "seek_write_control_b"] {
+        group.bench_function(control, |b| {
+            let mut file = tempfile::tempfile().expect("seek+write benchmark file");
+            file.set_len(WINDOW_BYTES).expect("size benchmark file");
+            let mut offset = 0_u64;
+            b.iter(|| {
+                for _ in 0..APPENDS_PER_ITER {
+                    file.seek(SeekFrom::Start(offset)).expect("seek append");
+                    file.write_all(black_box(&record)).expect("write append");
+                    offset += RECORD_SIZE_U64;
+                    if offset == WINDOW_BYTES {
+                        offset = 0;
+                    }
+                }
+                black_box(offset);
+            });
+        });
+    }
+
+    group.bench_function("positioned_write_candidate", |b| {
+        let file = tempfile::tempfile().expect("positioned benchmark file");
+        file.set_len(WINDOW_BYTES).expect("size benchmark file");
+        let mut offset = 0_u64;
+        b.iter(|| {
+            for _ in 0..APPENDS_PER_ITER {
+                file.write_all_at(black_box(&record), offset)
+                    .expect("positioned append");
+                offset += RECORD_SIZE_U64;
+                if offset == WINDOW_BYTES {
+                    offset = 0;
+                }
+            }
+            black_box(offset);
+        });
+    });
+    group.finish();
 }
 
 fn setup_ssi_pivot_192reads_32records(block_data: &[u8]) -> (MvccStore, ffs_mvcc::Transaction) {
@@ -2454,6 +2535,7 @@ criterion_group!(
     wal_benches,
     bench_read_visible_deep_chain,
     bench_wal_commit_throughput,
+    bench_wal_positioned_append,
     bench_ssi_overhead,
     bench_ebr_memory_report,
     bench_rcu_read_throughput,

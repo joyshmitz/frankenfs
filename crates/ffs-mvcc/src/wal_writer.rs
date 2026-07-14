@@ -24,6 +24,7 @@ use crate::wal::{self, HEADER_SIZE, WalCommit, WalHeader};
 use ffs_error::{FfsError, Result};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
+use std::os::unix::fs::FileExt;
 use std::path::Path;
 use tracing::{debug, error, info, warn};
 
@@ -776,8 +777,7 @@ impl WalWriter {
     }
 
     fn raw_append(&mut self, data: &[u8]) -> std::io::Result<()> {
-        self.file.seek(SeekFrom::Start(self.write_pos))?;
-        if let Err(e) = self.file.write_all(data) {
+        if let Err(e) = self.file.write_all_at(data, self.write_pos) {
             // Truncate to write_pos to remove any partially written bytes.
             let _ = self.file.set_len(self.write_pos);
             return Err(e);
