@@ -17,8 +17,8 @@
 //! early-exit finder walks the same entries allocating nothing. Both return the
 //! same answer (asserted for present + absent names).
 
-use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_ondisk::Ext4Inode;
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use ffs_ondisk::{Ext4Inode, Ext4Xattr};
 use ffs_types::all_zero_bytes;
 use ffs_xattr::{XattrReadAccess, XattrWriteAccess, get_xattr_for_access, xattr_exists_for_access};
 use std::hint::black_box;
@@ -86,6 +86,35 @@ fn read_access() -> XattrReadAccess {
 
 fn scalar_all_zero(block: &[u8]) -> bool {
     block.iter().all(|byte| *byte == 0)
+}
+
+fn frozen_clone_inline_candidate(
+    entries: &[Ext4Xattr],
+    name_index: u8,
+    name: &[u8],
+    value: &[u8],
+) -> Vec<Ext4Xattr> {
+    let mut candidate = entries.to_vec();
+    candidate.push(Ext4Xattr {
+        name_index,
+        name: name.to_vec(),
+        value: value.to_vec(),
+    });
+    candidate
+}
+
+fn moved_inline_candidate(
+    mut entries: Vec<Ext4Xattr>,
+    name_index: u8,
+    name: Vec<u8>,
+    value: &[u8],
+) -> Vec<Ext4Xattr> {
+    entries.push(Ext4Xattr {
+        name_index,
+        name,
+        value: value.to_vec(),
+    });
+    entries
 }
 
 fn bench_exists_probe(c: &mut Criterion) {
@@ -167,9 +196,59 @@ fn bench_zero_initialized_external_block(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_new_inline_candidate(c: &mut Criterion) {
+    let entries = (0..2)
+        .map(|i| Ext4Xattr {
+            name_index: 1,
+            name: format!("attr{i:02}").into_bytes(),
+            value: vec![u8::try_from(i).expect("small fixture index"); 24],
+        })
+        .collect::<Vec<_>>();
+    let name = b"fresh_attribute".to_vec();
+    let value = vec![0x5a; 32];
+
+    let old = frozen_clone_inline_candidate(&entries, 1, &name, &value);
+    let new = moved_inline_candidate(entries.clone(), 1, name.clone(), &value);
+    assert_eq!(old, new, "inline candidate bytes diverged");
+
+    let mut group = c.benchmark_group("xattr_new_inline_candidate_2");
+    for control in ["deep_clone_a", "deep_clone_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || (entries.clone(), name.clone()),
+                |(parsed, parsed_name)| {
+                    black_box(frozen_clone_inline_candidate(
+                        black_box(&parsed),
+                        1,
+                        black_box(&parsed_name),
+                        black_box(&value),
+                    ))
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("move_owned_candidate", |b| {
+        b.iter_batched(
+            || (entries.clone(), name.clone()),
+            |(parsed, parsed_name)| {
+                black_box(moved_inline_candidate(
+                    black_box(parsed),
+                    1,
+                    black_box(parsed_name),
+                    black_box(&value),
+                ))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_exists_probe,
-    bench_zero_initialized_external_block
+    bench_zero_initialized_external_block,
+    bench_new_inline_candidate
 );
 criterion_main!(benches);

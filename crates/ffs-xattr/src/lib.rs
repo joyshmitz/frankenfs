@@ -473,10 +473,10 @@ pub fn set_xattr(
         return Ok(XattrStorage::External);
     }
 
-    let mut inline_candidate = inline_entries.clone();
+    let mut inline_candidate = inline_entries;
     inline_candidate.push(Ext4Xattr {
         name_index,
-        name: name.clone(),
+        name,
         value: value.to_vec(),
     });
     if let Ok(new_ibody) = build_inline_ibody(inode.xattr_ibody.len(), &inline_candidate) {
@@ -484,15 +484,16 @@ pub fn set_xattr(
         return Ok(XattrStorage::Inline);
     }
 
+    let new_entry = inline_candidate
+        .pop()
+        .expect("inline candidate contains the appended xattr");
+    let inline_entries = inline_candidate;
+
     let Some(block) = external_block.as_mut() else {
         return Err(FfsError::NoSpace);
     };
     let block = &mut **block;
-    external_entries.push(Ext4Xattr {
-        name_index,
-        name,
-        value: value.to_vec(),
-    });
+    external_entries.push(new_entry);
     let new_block = build_external_block_owned(block.len(), external_entries)?;
     inode.xattr_ibody =
         build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
