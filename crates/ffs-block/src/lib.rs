@@ -4243,7 +4243,9 @@ impl ArcState {
         }
 
         for block in self.dirty_blocks() {
-            if queued.contains(&block) {
+            // DirtyTracker yields each block once. `queued` only needs to
+            // exclude candidates already recovered from pending_flush.
+            if !queued.is_empty() && queued.contains(&block) {
                 continue;
             }
             let Some(entry) = self.dirty.entry(block) else {
@@ -4275,7 +4277,6 @@ impl ArcState {
                     commit_seq,
                     seq: entry.seq,
                 });
-                queued.insert(block);
             }
         }
 
@@ -4321,7 +4322,9 @@ impl ArcState {
             if flushes.len() >= limit {
                 break;
             }
-            if queued.contains(&block) {
+            // DirtyTracker yields each block once. `queued` only needs to
+            // exclude candidates already recovered from pending_flush.
+            if !queued.is_empty() && queued.contains(&block) {
                 continue;
             }
             let Some(entry) = self.dirty.entry(block) else {
@@ -4353,7 +4356,6 @@ impl ArcState {
                     commit_seq,
                     seq: entry.seq,
                 });
-                queued.insert(block);
             }
         }
 

@@ -11,6 +11,7 @@ use ffs_error::Result;
 use ffs_types::{BlockNumber, ByteOffset, TxnId};
 use parking_lot::Mutex;
 use std::cmp::Ordering;
+use std::collections::HashSet;
 use std::env;
 use std::fs::{self, File};
 use std::hint::black_box;
@@ -740,6 +741,103 @@ fn bench_writeback_sync_100x4k(c: &mut Criterion) {
     });
 }
 
+/// Frozen pre-change selector: every selected dirty block is inserted even
+/// though the dirty list is unique by construction.
+fn legacy_flush_membership_select(
+    pending: &[BlockNumber],
+    dirty: &[BlockNumber],
+    limit: usize,
+) -> Vec<BlockNumber> {
+    let mut selected = pending.iter().copied().take(limit).collect::<Vec<_>>();
+    let mut queued = HashSet::with_capacity(selected.len());
+    queued.extend(selected.iter().copied());
+    for &block in dirty {
+        if selected.len() >= limit {
+            break;
+        }
+        if queued.contains(&block) {
+            continue;
+        }
+        selected.push(block);
+        queued.insert(block);
+    }
+    selected
+}
+
+/// Candidate selector: the membership set contains pending candidates only.
+/// `DirtyTracker::dirty_blocks_oldest_first` cannot yield a block twice.
+fn pending_only_flush_membership_select(
+    pending: &[BlockNumber],
+    dirty: &[BlockNumber],
+    limit: usize,
+) -> Vec<BlockNumber> {
+    let mut selected = pending.iter().copied().take(limit).collect::<Vec<_>>();
+    let mut queued = HashSet::with_capacity(selected.len());
+    queued.extend(selected.iter().copied());
+    for &block in dirty {
+        if selected.len() >= limit {
+            break;
+        }
+        if !queued.is_empty() && queued.contains(&block) {
+            continue;
+        }
+        selected.push(block);
+    }
+    selected
+}
+
+fn bench_flush_pending_membership(c: &mut Criterion) {
+    let dirty = (0..4_096_u64).map(BlockNumber).collect::<Vec<_>>();
+    let pending_overlap = [dirty[0], dirty[2_048], dirty[4_095]];
+    let pending_disjoint = [BlockNumber(9_000), BlockNumber(9_001)];
+
+    for (pending, dirty_blocks, limit) in [
+        (&[][..], &[][..], usize::MAX),
+        (&[][..], &dirty[..1], usize::MAX),
+        (&pending_overlap[..], dirty.as_slice(), usize::MAX),
+        (&pending_overlap[..], dirty.as_slice(), 17),
+        (&pending_disjoint[..], dirty.as_slice(), 1),
+        (&pending_disjoint[..], dirty.as_slice(), 4_096),
+    ] {
+        assert_eq!(
+            legacy_flush_membership_select(pending, dirty_blocks, limit),
+            pending_only_flush_membership_select(pending, dirty_blocks, limit),
+            "pending-only membership changed flush selection"
+        );
+    }
+
+    let pending = Vec::new();
+    let mut group = c.benchmark_group("arc_flush_pending_membership_4096");
+    group.bench_function("legacy_a", |b| {
+        b.iter(|| {
+            black_box(legacy_flush_membership_select(
+                black_box(&pending),
+                black_box(&dirty),
+                usize::MAX,
+            ))
+        });
+    });
+    group.bench_function("legacy_b", |b| {
+        b.iter(|| {
+            black_box(legacy_flush_membership_select(
+                black_box(&pending),
+                black_box(&dirty),
+                usize::MAX,
+            ))
+        });
+    });
+    group.bench_function("pending_only", |b| {
+        b.iter(|| {
+            black_box(pending_only_flush_membership_select(
+                black_box(&pending),
+                black_box(&dirty),
+                usize::MAX,
+            ))
+        });
+    });
+    group.finish();
+}
+
 fn make_dirty_front_pressure_cache(
     capacity: usize,
     dirty_prefix: usize,
@@ -816,6 +914,7 @@ criterion_group!(
     bench_writeback_write_random_4k,
     bench_writeback_sync_single_4k,
     bench_writeback_sync_100x4k,
+    bench_flush_pending_membership,
     bench_dirty_front_pressure_trim,
     bench_workload_sequential_scan,
     bench_workload_zipf,
