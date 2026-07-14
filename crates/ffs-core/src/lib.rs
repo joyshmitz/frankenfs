@@ -18012,26 +18012,29 @@ impl OpenFs {
     #[cfg(feature = "bhh0i_sharded_alloc")]
     fn ext4_sharded_locate_inode(&self, ino: InodeNumber) -> Option<ffs_inode::InodeLocation> {
         let sb = self.ext4_superblock()?;
-        let geo = FsGeometry::from_superblock(sb);
-        if ino.0 == 0
-            || geo.inodes_per_group == 0
-            || geo.block_size == 0
-            || geo.inode_size == 0
-        {
+        // Read the three verbatim superblock fields this locator needs directly,
+        // rather than building the whole `FsGeometry::from_superblock(sb)` (a u64
+        // group-count division plus a ~20-field struct build) only to read them
+        // back out — the locator uses no derived geometry field. Byte-identical
+        // (`from_superblock` copies each of these unchanged from `sb`).
+        let inodes_per_group = sb.inodes_per_group;
+        let block_size = sb.block_size;
+        let inode_size = sb.inode_size;
+        if ino.0 == 0 || inodes_per_group == 0 || block_size == 0 || inode_size == 0 {
             return None;
         }
         let sharded = self.ext4_sharded_alloc.as_ref()?;
-        let group = ffs_types::inode_to_group(ino, geo.inodes_per_group);
+        let group = ffs_types::inode_to_group(ino, inodes_per_group);
         let gidx = group.0 as usize;
         if gidx >= sharded.group_count() {
             return None;
         }
         let inode_table_block = sharded.lock_group(gidx).inode_table_block;
-        let index = ffs_types::inode_index_in_group(ino, geo.inodes_per_group);
-        let byte_in_table = u64::from(index) * u64::from(geo.inode_size);
-        let block_offset = byte_in_table / u64::from(geo.block_size);
+        let index = ffs_types::inode_index_in_group(ino, inodes_per_group);
+        let byte_in_table = u64::from(index) * u64::from(inode_size);
+        let block_offset = byte_in_table / u64::from(block_size);
         #[allow(clippy::cast_possible_truncation)]
-        let byte_offset = (byte_in_table % u64::from(geo.block_size)) as usize;
+        let byte_offset = (byte_in_table % u64::from(block_size)) as usize;
         let block = BlockNumber(inode_table_block.0.checked_add(block_offset)?);
         Some(ffs_inode::InodeLocation { block, byte_offset })
     }

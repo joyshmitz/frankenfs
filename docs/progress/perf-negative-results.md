@@ -13,6 +13,39 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` `ext4_sharded_locate_inode` reads verbatim superblock fields, not a whole `FsGeometry` + the extent-meta double-walk candidate - 2026-07-14 (KEEP + BOUND)
+
+Status: KEEP (the hotter sibling of the inode_size field read) + BOUND (skipping the
+post-write extent-tree meta walk is a real DEFAULT-path lever but correctness-gated).
+
+**KEEP — `ext4_sharded_locate_inode`: `from_superblock(sb).{fields}` -> `sb.{fields}`.**
+The locator built the whole `FsGeometry::from_superblock(sb)` — a u64 group-count
+division plus a ~20-field struct build — but uses ONLY three verbatim superblock
+fields (`inodes_per_group`, `block_size`, `inode_size`), no derived geometry (not even
+`group_count`). Read them straight off `sb`. Byte-identical: `from_superblock` copies
+each unchanged, and `ext4_sharded_locate_inode_matches_locate_inode_bd_bhh0i` (asserts
+the sharded locator reproduces single-lock `locate_inode` exactly across a spread of
+inodes) stays green (bd_bhh0i 24/24). Hotter than last turn's inode_size site: this
+runs per sharded create AND per parent-inode write. Magnitude = the eliminated
+`from_superblock` build (benches/bhh0i_geo_field): **8.34 ns** -> field reads
+**0.53 ns**, ~7 ns net/call. Feature-gated (default-off) -> realized post-cutover; a
+Pareto cleanup on the 3.7x target path (sibling of 9a5c795f / da1c804d).
+
+**BOUND — skip the post-write extent-tree meta walk on no-op writes (candidate, NOT
+landed; correctness-gated).** `ext4_write` counts extent-tree metadata blocks BEFORE
+(22399) and AFTER (22698) the write and charges the delta to `i_blocks` — TWO tree
+walks per write. On a pure in-place overwrite the tree is unchanged, so the "after"
+walk is redundant. This is a genuine DEFAULT-path lever (writes are common; the walk
+reads index/leaf nodes for deep trees). BUT a naive "nothing was allocated -> skip"
+signal is UNSOUND: an unwritten->written extent SPLIT (writing into fallocate'd blocks)
+mutates the tree WITHOUT allocating data blocks, and if it overflows a leaf the node
+count (hence `i_blocks`) changes — skipping the walk would MISCOUNT i_blocks =
+e2fsck-dirty. A sound version needs a "did any extent-tree node get added/removed"
+signal plumbed through `ffs_btree` insert/split/coalesce, and the i_blocks drift can
+only be validated with a real `e2fsck` (local-only, the cutover wall). Retry predicate:
+implement the node-delta signal in ffs_btree AND validate with local `e2fsck` on a
+fallocate+overwrite workload; do NOT gate on allocation count alone.
+
 ## `bd-bhh0i` read `inode_size` off the superblock, not a whole `FsGeometry` + geometry-caching is resize-unsafe - 2026-07-14 (KEEP + BOUND)
 
 Status: KEEP (a clean byte-identical sibling on the sharded create path) + BOUND
