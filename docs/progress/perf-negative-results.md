@@ -13,6 +13,22 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## MVCC flush/fsync path (ShardedMvccStore::flush_to_device): already coalesce-optimized - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed the flush path (per fsync/sync); already optimized. No lever.
+
+`flush_to_device` collects visible (block, bytes) across shards (each under a brief read
+lock), then `sort_unstable_by_key` on block number, coalesces contiguous blocks into
+runs, and writes each run with ONE `write_contiguous_blocks` (a single pwrite instead of
+one per block) + a single `sync` at the end. Already the right shape:
+- `sort_unstable` (not stable) + contiguous coalescing = sequential-I/O optimal.
+- the per-block owned `Vec` (`resolve_version_bytes_at_or_before`) is LOAD-BEARING: the
+  data must outlive the shard read lock, which is deliberately released BEFORE the I/O
+  ("sort + coalesce + write holding no shard lock"), so it cannot borrow.
+- fsync is I/O-bound anyway; the O(N log N) collect+sort is dwarfed by the writes.
+No lever. The fsync/flush path joins the mined set (cf. rejected JBD2 sequence sort
+e04d2428, fsync_latency_workload bench).
+
 ## Free/delete serial floor (free_inode/free_blocks_in_group): already optimized - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed the delete serial floor (free-path analog of the alloc floor);
