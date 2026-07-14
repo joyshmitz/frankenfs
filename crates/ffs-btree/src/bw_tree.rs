@@ -1203,10 +1203,7 @@ fn apply_op(state: &mut BTreeMap<BwKey, BwValue>, op: MaterializeOp) {
             state.remove(&key);
         }
         MaterializeOp::Split { separator } => {
-            let keys_to_remove: Vec<_> = state.range(separator..).map(|(k, _)| *k).collect();
-            for k in keys_to_remove {
-                state.remove(&k);
-            }
+            drop(state.split_off(&separator));
         }
     }
 }

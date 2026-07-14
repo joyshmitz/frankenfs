@@ -8,12 +8,13 @@
 //! 4. Single-threaded baseline
 //! 5. Consolidation overhead
 
-use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, BenchmarkId, Criterion, criterion_group, criterion_main};
 use ffs_btree::bw_tree::{
     BwKey, BwValue, ConsolidationConfig, DeltaMutation, MappingTable, PageDelta, PageId,
 };
 use std::collections::BTreeMap;
 use std::sync::{Arc, Barrier, Mutex};
+use std::time::Duration;
 
 const PAGE_CAPACITY: usize = 16;
 const PREPOPULATE: u64 = 10_000;
@@ -643,6 +644,79 @@ fn bench_point_lookup_ab(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Scenario 7: Split materialization tail pruning A/A/B ───────────────
+//
+// Same-binary controls isolate the tail-pruning primitive used while a Bw-tree
+// split delta is materialized. The frozen path first collects every key at or
+// above the separator and then performs one tree lookup/removal per key. The
+// candidate partitions the BTreeMap once and drops the detached upper half.
+
+fn frozen_remove_split_tail(state: &mut BTreeMap<BwKey, BwValue>, separator: BwKey) {
+    let keys_to_remove: Vec<_> = state.range(separator..).map(|(key, _)| *key).collect();
+    for key in keys_to_remove {
+        state.remove(&key);
+    }
+}
+
+fn split_off_tail(state: &mut BTreeMap<BwKey, BwValue>, separator: BwKey) {
+    drop(state.split_off(&separator));
+}
+
+fn split_materialization_fixture() -> BTreeMap<BwKey, BwValue> {
+    (0..4096_u64)
+        .map(|key| (BwKey(key), BwValue(key.wrapping_mul(17))))
+        .collect()
+}
+
+fn bench_split_materialize_tail_ab(c: &mut Criterion) {
+    let fixture = split_materialization_fixture();
+    for separator in [0_u64, 1, 2048, 4095, 4096, 5000] {
+        let mut control = fixture.clone();
+        let mut candidate = fixture.clone();
+        frozen_remove_split_tail(&mut control, BwKey(separator));
+        split_off_tail(&mut candidate, BwKey(separator));
+        assert_eq!(candidate, control, "separator {separator}");
+    }
+
+    let mut empty_control = BTreeMap::new();
+    let mut empty_candidate = BTreeMap::new();
+    frozen_remove_split_tail(&mut empty_control, BwKey(0));
+    split_off_tail(&mut empty_candidate, BwKey(0));
+    assert_eq!(empty_candidate, empty_control);
+
+    let separator = BwKey(2048);
+    let mut group = c.benchmark_group("bwtree_split_materialize_tail_4096");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    for control in ["remove_control_a", "remove_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || fixture.clone(),
+                |mut state| {
+                    frozen_remove_split_tail(&mut state, separator);
+                    std::hint::black_box(state.len())
+                },
+                BatchSize::PerIteration,
+            )
+        });
+    }
+
+    group.bench_function("split_off_candidate", |b| {
+        b.iter_batched(
+            || fixture.clone(),
+            |mut state| {
+                split_off_tail(&mut state, separator);
+                std::hint::black_box(state.len())
+            },
+            BatchSize::PerIteration,
+        )
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_heavy,
@@ -652,5 +726,6 @@ criterion_group!(
     bench_write_heavy_message_buffer_ab,
     bench_consolidation_overhead,
     bench_point_lookup_ab,
+    bench_split_materialize_tail_ab,
 );
 criterion_main!(benches);
