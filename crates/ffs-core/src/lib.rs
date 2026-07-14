@@ -12225,16 +12225,60 @@ impl OpenFs {
         inode: &Ext4Inode,
         csum_seed: u32,
     ) -> Result<(), FfsError> {
-        scope.tx.as_mut().map_or_else(
-            || ffs_inode::write_inode(cx, block_dev, geo, groups, ino, inode, csum_seed),
-            |tx| {
-                let tx_dev = TransactionBlockAdapter {
-                    base: block_dev,
-                    tx: Mutex::new(tx),
-                };
-                ffs_inode::write_inode(cx, &tx_dev, geo, groups, ino, inode, csum_seed)
-            },
-        )
+        let Some(tx) = scope.tx.as_mut() else {
+            // No transaction: write straight through the device.
+            return ffs_inode::write_inode(cx, block_dev, geo, groups, ino, inode, csum_seed);
+        };
+
+        let inode_size = usize::from(geo.inode_size);
+        let loc = ffs_inode::locate_inode(ino, geo, groups).ok_or_else(|| FfsError::Corruption {
+            block: 0,
+            detail: format!("inode {ino} out of range"),
+        })?;
+
+        // Serialize the inode's slot bytes (the exact bytes `write_inode` lands).
+        let mut stack = [0u8; 256];
+        let mut heap: Vec<u8>;
+        let slot: &mut [u8] = if inode_size <= stack.len() {
+            &mut stack[..inode_size]
+        } else {
+            heap = vec![0u8; inode_size];
+            &mut heap
+        };
+        ffs_inode::serialize_inode_with_checksum(inode, inode_size, ino, csum_seed, slot);
+
+        // Read the inode-table block with read-your-writes (a prior write in THIS tx
+        // — e.g. another inode sharing this block — must be seen), patch the slot,
+        // then stage the whole block. When this tx has not yet touched the block (the
+        // common one-inode-per-block case) stage it under a SLOT-SCOPED merge proof:
+        // two concurrent txns writing DISJOINT inode slots of this block then MERGE
+        // instead of first-committer-wins conflicting — the parallel-create/setattr
+        // bottleneck (bd-bhh0i). When the tx already touched the block, fall back to
+        // the default `Unsafe` proof (the block carries >1 of this tx's changes, so a
+        // single-slot range would be invalid) — the pre-existing behavior. Byte-
+        // identical single-threaded: the proof is consulted ONLY on a commit conflict,
+        // which cannot occur without a concurrent writer; the STAGED BYTES are the
+        // same block-with-slot-patched the adapter path produced.
+        let staged = tx.staged_write(loc.block).map(<[u8]>::to_vec);
+        let already_staged = staged.is_some();
+        let mut block_data = match staged {
+            Some(bytes) => bytes,
+            None => block_dev.read_block(cx, loc.block)?.as_slice().to_vec(),
+        };
+        if loc.byte_offset + inode_size > block_data.len() {
+            return Err(FfsError::Corruption {
+                block: loc.block.0,
+                detail: "inode extends beyond block boundary".into(),
+            });
+        }
+        block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(slot);
+        let proof = if already_staged {
+            MergeProof::Unsafe
+        } else {
+            MergeProof::timestamp_only_inode_range(loc.byte_offset, inode_size)
+        };
+        tx.stage_write_with_proof(loc.block, block_data, proof);
+        Ok(())
     }
 
     /// Resolve a logical file block to a physical block number via the inode's
