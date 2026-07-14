@@ -735,7 +735,7 @@ fn before_range_bound(key: BwKey, bound: Option<BwKey>) -> bool {
     bound.is_none_or(|bound| key < bound)
 }
 
-fn replay_bounded_range<const RETAIN_TOP_K: bool>(
+fn replay_bounded_range<const RETAIN_TOP_K: bool, const FUSE_SHADOW_INSERT: bool>(
     entries: &BTreeMap<BwKey, BwValue>,
     ops: &[RangeReplayOp],
     start: BwKey,
@@ -752,10 +752,12 @@ fn replay_bounded_range<const RETAIN_TOP_K: bool>(
     for op in ops {
         match *op {
             RangeReplayOp::Insert { key, value } => {
-                if key >= start
-                    && !shadowed_keys.contains(&key)
-                    && before_range_bound(key, base_upper_bound)
-                {
+                let first_seen = if FUSE_SHADOW_INSERT {
+                    shadowed_keys.insert(key)
+                } else {
+                    !shadowed_keys.contains(&key)
+                };
+                if key >= start && first_seen && before_range_bound(key, base_upper_bound) {
                     let should_retain = !RETAIN_TOP_K
                         || delta_values.len() < count
                         || delta_values
@@ -768,7 +770,9 @@ fn replay_bounded_range<const RETAIN_TOP_K: bool>(
                         }
                     }
                 }
-                shadowed_keys.insert(key);
+                if !FUSE_SHADOW_INSERT {
+                    shadowed_keys.insert(key);
+                }
             }
             RangeReplayOp::Delete { key } => {
                 shadowed_keys.insert(key);
@@ -849,8 +853,8 @@ fn bench_range_delta_top_k_ab(c: &mut Criterion) {
     for start in [BwKey(0), BwKey(4096), BwKey(16_000)] {
         for count in [0, 1, 16, 1024, 8192] {
             assert_eq!(
-                replay_bounded_range::<true>(&entries, &ops, start, count),
-                replay_bounded_range::<false>(&entries, &ops, start, count),
+                replay_bounded_range::<true, false>(&entries, &ops, start, count),
+                replay_bounded_range::<false, false>(&entries, &ops, start, count),
                 "start={} count={count}",
                 start.0
             );
@@ -878,8 +882,18 @@ fn bench_range_delta_top_k_ab(c: &mut Criterion) {
     ];
     for count in 0..=32 {
         assert_eq!(
-            replay_bounded_range::<true>(&adversarial_entries, &adversarial_ops, BwKey(0), count,),
-            replay_bounded_range::<false>(&adversarial_entries, &adversarial_ops, BwKey(0), count,),
+            replay_bounded_range::<true, false>(
+                &adversarial_entries,
+                &adversarial_ops,
+                BwKey(0),
+                count,
+            ),
+            replay_bounded_range::<false, false>(
+                &adversarial_entries,
+                &adversarial_ops,
+                BwKey(0),
+                count,
+            ),
             "adversarial count={count}"
         );
     }
@@ -892,13 +906,113 @@ fn bench_range_delta_top_k_ab(c: &mut Criterion) {
     for control in ["unbounded_control_a", "unbounded_control_b"] {
         group.bench_function(control, |b| {
             b.iter(|| {
-                std::hint::black_box(replay_bounded_range::<false>(&entries, &ops, BwKey(0), 16))
+                std::hint::black_box(replay_bounded_range::<false, false>(
+                    &entries,
+                    &ops,
+                    BwKey(0),
+                    16,
+                ))
             })
         });
     }
 
     group.bench_function("topk_candidate", |b| {
-        b.iter(|| std::hint::black_box(replay_bounded_range::<true>(&entries, &ops, BwKey(0), 16)))
+        b.iter(|| {
+            std::hint::black_box(replay_bounded_range::<true, false>(
+                &entries,
+                &ops,
+                BwKey(0),
+                16,
+            ))
+        })
+    });
+
+    group.finish();
+}
+
+// ── Scenario 9: Range-scan shadow membership A/A/B ────────────────────
+//
+// The frozen path probes `shadowed_keys` and then inserts the same key, paying
+// for two ordered-tree descents. The candidate uses `insert`'s boolean result
+// as the first-seen predicate and therefore performs one descent.
+
+fn bench_range_shadow_insert_fusion_ab(c: &mut Criterion) {
+    let (entries, ops) = range_delta_top_k_fixture();
+    for start in [BwKey(0), BwKey(4096), BwKey(16_000)] {
+        for count in [0, 1, 16, 1024, 8192] {
+            assert_eq!(
+                replay_bounded_range::<true, true>(&entries, &ops, start, count),
+                replay_bounded_range::<true, false>(&entries, &ops, start, count),
+                "start={} count={count}",
+                start.0
+            );
+        }
+    }
+
+    let adversarial_entries = (0..32_u64).map(|key| (BwKey(key), BwValue(key))).collect();
+    let adversarial_ops = [
+        RangeReplayOp::Insert {
+            key: BwKey(30),
+            value: BwValue(300),
+        },
+        RangeReplayOp::Delete { key: BwKey(2) },
+        RangeReplayOp::Insert {
+            key: BwKey(30),
+            value: BwValue(30),
+        },
+        RangeReplayOp::Insert {
+            key: BwKey(3),
+            value: BwValue(3000),
+        },
+        RangeReplayOp::Split {
+            separator: BwKey(31),
+        },
+    ];
+    for count in 0..=32 {
+        assert_eq!(
+            replay_bounded_range::<true, true>(
+                &adversarial_entries,
+                &adversarial_ops,
+                BwKey(0),
+                count,
+            ),
+            replay_bounded_range::<true, false>(
+                &adversarial_entries,
+                &adversarial_ops,
+                BwKey(0),
+                count,
+            ),
+            "adversarial count={count}"
+        );
+    }
+
+    let mut group = c.benchmark_group("bwtree_range_shadow_insert_8192_ops_count16");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    for control in ["contains_insert_control_a", "contains_insert_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                std::hint::black_box(replay_bounded_range::<true, false>(
+                    &entries,
+                    &ops,
+                    BwKey(0),
+                    16,
+                ))
+            })
+        });
+    }
+
+    group.bench_function("insert_result_candidate", |b| {
+        b.iter(|| {
+            std::hint::black_box(replay_bounded_range::<true, true>(
+                &entries,
+                &ops,
+                BwKey(0),
+                16,
+            ))
+        })
     });
 
     group.finish();
@@ -915,5 +1029,6 @@ criterion_group!(
     bench_point_lookup_ab,
     bench_split_materialize_tail_ab,
     bench_range_delta_top_k_ab,
+    bench_range_shadow_insert_fusion_ab,
 );
 criterion_main!(benches);

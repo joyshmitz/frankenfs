@@ -1040,10 +1040,8 @@ fn bounded_range_from_base(
     for op in ops {
         match *op {
             MaterializeOp::Insert { key, value } => {
-                if key >= start
-                    && !shadowed_keys.contains(&key)
-                    && key_before_bound(key, base_upper_bound)
-                {
+                let first_seen = shadowed_keys.insert(key);
+                if key >= start && first_seen && key_before_bound(key, base_upper_bound) {
                     let should_retain = delta_values.len() < count
                         || delta_values
                             .last_key_value()
@@ -1055,7 +1053,6 @@ fn bounded_range_from_base(
                         }
                     }
                 }
-                shadowed_keys.insert(key);
             }
             MaterializeOp::Delete { key } => {
                 shadowed_keys.insert(key);
