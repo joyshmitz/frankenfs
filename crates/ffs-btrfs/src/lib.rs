@@ -1630,17 +1630,7 @@ fn uuid_is_set(uuid: &[u8; 16]) -> bool {
 pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
     let mut roots = Vec::new();
     let mut source_ids = FxHashMap::default();
-    let mut snapshot_names = FxHashMap::default();
     for entry in entries {
-        if entry.key.item_type == BTRFS_ITEM_ROOT_REF {
-            if let std::collections::hash_map::Entry::Vacant(slot) =
-                snapshot_names.entry(entry.key.offset)
-                && let Ok(root_ref) = parse_root_ref(&entry.data)
-            {
-                slot.insert(root_ref.name);
-            }
-            continue;
-        }
         if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
             continue;
         }
@@ -1654,6 +1644,22 @@ pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
         }
     }
 
+    // Only snapshot roots can consume a ROOT_REF name. Index those candidates
+    // first so regular subvolume refs are neither parsed nor allocated.
+    let mut snapshot_names: FxHashMap<u64, Option<Vec<u8>>> =
+        roots.iter().map(|(id, _)| (*id, None)).collect();
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_REF {
+            continue;
+        }
+        if let Some(name) = snapshot_names.get_mut(&entry.key.offset)
+            && name.is_none()
+            && let Ok(root_ref) = parse_root_ref(&entry.data)
+        {
+            *name = Some(root_ref.name);
+        }
+    }
+
     let mut snapshots = Vec::new();
 
     // Build snapshots from the candidates retained above.
@@ -1661,10 +1667,13 @@ pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
         // Find the source subvolume by matching parent_uuid to uuid.
         let source_id = source_ids.get(&root.parent_uuid).copied().unwrap_or(0);
 
-        let name = snapshot_names.get(&id).map_or_else(
-            || format!("snap-{id}"),
-            |name| String::from_utf8_lossy(name).into_owned(),
-        );
+        let name = snapshot_names
+            .get(&id)
+            .and_then(Option::as_ref)
+            .map_or_else(
+                || format!("snap-{id}"),
+                |name| String::from_utf8_lossy(name).into_owned(),
+            );
 
         snapshots.push(BtrfsSnapshot {
             id,

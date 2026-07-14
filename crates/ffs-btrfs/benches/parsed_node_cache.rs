@@ -983,6 +983,175 @@ fn bench_snapshot_candidate_filter(c: &mut Criterion) {
     group.finish();
 }
 
+fn snapshot_name_filter_catalog(regular_count: u64, snapshot_count: u64) -> Vec<BtrfsLeafEntry> {
+    let first_regular = BTRFS_FIRST_FREE_OBJECTID;
+    let first_snapshot = first_regular + regular_count;
+    let capacity = usize::try_from((regular_count + snapshot_count) * 2)
+        .expect("snapshot name-filter fixture size fits");
+    let mut entries = Vec::with_capacity(capacity);
+
+    for id in first_regular..first_snapshot {
+        entries.push(subvolume_root_ref(
+            5,
+            id,
+            format!("regular-{id}").as_bytes(),
+        ));
+    }
+    for id in first_snapshot..first_snapshot + snapshot_count {
+        entries.push(subvolume_root_ref(
+            5,
+            id,
+            format!("snapshot-{id}").as_bytes(),
+        ));
+    }
+    for id in first_regular..first_snapshot {
+        entries.push(snapshot_root_item(id, snapshot_uuid(id), [0; 16]));
+    }
+    for offset in 0..snapshot_count {
+        let snapshot_id = first_snapshot + offset;
+        let source_id = first_regular + offset % regular_count;
+        entries.push(snapshot_root_item(
+            snapshot_id,
+            snapshot_uuid(snapshot_id),
+            snapshot_uuid(source_id),
+        ));
+    }
+
+    entries
+}
+
+/// `CANDIDATE_NAMES_ONLY=false` freezes the pre-change single-pass name
+/// index. `true` mirrors production's candidate-index plus second catalog scan.
+fn snapshot_enumeration_name_filter<const CANDIDATE_NAMES_ONLY: bool>(
+    entries: &[BtrfsLeafEntry],
+) -> Vec<BtrfsSnapshot> {
+    let mut roots = Vec::new();
+    let mut source_ids = FxHashMap::default();
+    let mut snapshot_names: FxHashMap<u64, Option<Vec<u8>>> = FxHashMap::default();
+
+    for entry in entries {
+        if entry.key.item_type == BTRFS_ITEM_ROOT_REF {
+            if !CANDIDATE_NAMES_ONLY
+                && let std::collections::hash_map::Entry::Vacant(slot) =
+                    snapshot_names.entry(entry.key.offset)
+                && let Ok(root_ref) = parse_root_ref(&entry.data)
+            {
+                slot.insert(Some(root_ref.name));
+            }
+            continue;
+        }
+        if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+            continue;
+        }
+        if let Ok(root) = parse_root_item(&entry.data) {
+            if root.uuid.iter().any(|&byte| byte != 0) {
+                source_ids.entry(root.uuid).or_insert(entry.key.objectid);
+            }
+            if entry.key.objectid >= BTRFS_FIRST_FREE_OBJECTID
+                && root.parent_uuid.iter().any(|&byte| byte != 0)
+            {
+                roots.push((entry.key.objectid, root));
+            }
+        }
+    }
+
+    if CANDIDATE_NAMES_ONLY {
+        snapshot_names.extend(roots.iter().map(|(id, _)| (*id, None)));
+        for entry in entries {
+            if entry.key.item_type != BTRFS_ITEM_ROOT_REF {
+                continue;
+            }
+            if let Some(name) = snapshot_names.get_mut(&entry.key.offset)
+                && name.is_none()
+                && let Ok(root_ref) = parse_root_ref(&entry.data)
+            {
+                *name = Some(root_ref.name);
+            }
+        }
+    }
+
+    roots
+        .into_iter()
+        .map(|(id, root)| BtrfsSnapshot {
+            id,
+            source_id: source_ids.get(&root.parent_uuid).copied().unwrap_or(0),
+            name: snapshot_names
+                .get(&id)
+                .and_then(Option::as_ref)
+                .map_or_else(
+                    || format!("snap-{id}"),
+                    |name| String::from_utf8_lossy(name).into_owned(),
+                ),
+            generation: root.generation,
+            uuid: root.uuid,
+            parent_uuid: root.parent_uuid,
+            bytenr: root.bytenr,
+            level: root.level,
+        })
+        .collect()
+}
+
+fn assert_snapshot_name_filter_isomorphic(entries: &[BtrfsLeafEntry]) {
+    let expected = snapshot_enumeration_name_filter::<false>(entries);
+    assert_eq!(snapshot_enumeration_name_filter::<false>(entries), expected);
+    assert_eq!(snapshot_enumeration_name_filter::<true>(entries), expected);
+    assert_eq!(enumerate_snapshots(entries), expected);
+}
+
+fn bench_snapshot_name_filter_group(c: &mut Criterion, label: &str, entries: &[BtrfsLeafEntry]) {
+    let mut group = c.benchmark_group(format!("btrfs_snapshot_name_filter_{label}"));
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(2));
+    for control in ["all_names_control_a", "all_names_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                black_box(snapshot_enumeration_name_filter::<false>(black_box(
+                    entries,
+                )))
+            });
+        });
+    }
+    group.bench_function("snapshot_names_only", |b| {
+        b.iter(|| black_box(snapshot_enumeration_name_filter::<true>(black_box(entries))));
+    });
+    group.finish();
+}
+
+fn bench_snapshot_name_filter(c: &mut Criterion) {
+    assert_snapshot_name_filter_isomorphic(&[]);
+
+    let source_uuid = snapshot_uuid(300);
+    let mut malformed = subvolume_root_ref(5, 400, b"broken");
+    malformed.data.truncate(20);
+    assert_snapshot_name_filter_isomorphic(&[
+        subvolume_root_ref(5, 300, b"regular-name"),
+        malformed,
+        subvolume_root_ref(7, 400, &[0xff, b'x']),
+        subvolume_root_ref(9, 400, b"later-valid"),
+        snapshot_root_item(300, source_uuid, [0; 16]),
+        snapshot_root_item(400, snapshot_uuid(400), source_uuid),
+        snapshot_root_item(400, snapshot_uuid(401), source_uuid),
+    ]);
+    assert_snapshot_name_filter_isomorphic(&[
+        snapshot_root_item(300, source_uuid, [0; 16]),
+        snapshot_root_item(401, snapshot_uuid(401), source_uuid),
+    ]);
+
+    const REGULAR_ROOTS: u64 = 4096;
+    const SNAPSHOTS: u64 = 64;
+    let sparse_entries = snapshot_name_filter_catalog(REGULAR_ROOTS, SNAPSHOTS);
+    assert_snapshot_name_filter_isomorphic(&sparse_entries);
+
+    const DENSE_SNAPSHOTS: u64 = 1024;
+    let dense_entries = named_snapshot_catalog(DENSE_SNAPSHOTS);
+    assert_snapshot_name_filter_isomorphic(&dense_entries);
+
+    bench_snapshot_name_filter_group(c, "4096_regular_64_snapshots", &sparse_entries);
+    bench_snapshot_name_filter_group(c, "dense_1024_snapshots", &dense_entries);
+}
+
 fn assert_snapshot_enumeration_isomorphic(entries: &[BtrfsLeafEntry]) {
     assert_eq!(
         enumerate_snapshots(entries),
@@ -1304,6 +1473,7 @@ criterion_group!(
     bench_snapshot_source_uuid_index,
     bench_snapshot_root_ref_index,
     bench_snapshot_candidate_filter,
+    bench_snapshot_name_filter,
     bench_snapshot_diff_ordered_merge
 );
 criterion_main!(parsed_node_cache);
