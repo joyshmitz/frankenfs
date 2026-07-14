@@ -1739,34 +1739,32 @@ pub fn snapshot_diff_by_generation(
                 });
                 let _ = new_inodes.next();
             }
-            (Some((old_oid, old_gen)), Some((new_oid, new_gen))) => {
-                match old_oid.cmp(&new_oid) {
-                    std::cmp::Ordering::Less => {
+            (Some((old_oid, old_gen)), Some((new_oid, new_gen))) => match old_oid.cmp(&new_oid) {
+                std::cmp::Ordering::Less => {
+                    diffs.push(SnapshotDiffEntry {
+                        inode: old_oid,
+                        change_type: SnapshotChangeType::Deleted,
+                    });
+                    let _ = old_inodes.next();
+                }
+                std::cmp::Ordering::Greater => {
+                    diffs.push(SnapshotDiffEntry {
+                        inode: new_oid,
+                        change_type: SnapshotChangeType::Added,
+                    });
+                    let _ = new_inodes.next();
+                }
+                std::cmp::Ordering::Equal => {
+                    if new_gen > old_gen {
                         diffs.push(SnapshotDiffEntry {
                             inode: old_oid,
-                            change_type: SnapshotChangeType::Deleted,
+                            change_type: SnapshotChangeType::Modified,
                         });
-                        let _ = old_inodes.next();
                     }
-                    std::cmp::Ordering::Greater => {
-                        diffs.push(SnapshotDiffEntry {
-                            inode: new_oid,
-                            change_type: SnapshotChangeType::Added,
-                        });
-                        let _ = new_inodes.next();
-                    }
-                    std::cmp::Ordering::Equal => {
-                        if new_gen > old_gen {
-                            diffs.push(SnapshotDiffEntry {
-                                inode: old_oid,
-                                change_type: SnapshotChangeType::Modified,
-                            });
-                        }
-                        let _ = old_inodes.next();
-                        let _ = new_inodes.next();
-                    }
+                    let _ = old_inodes.next();
+                    let _ = new_inodes.next();
                 }
-            }
+            },
         }
     }
     diffs
