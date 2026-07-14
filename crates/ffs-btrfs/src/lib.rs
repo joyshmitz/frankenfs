@@ -1630,7 +1630,17 @@ fn uuid_is_set(uuid: &[u8; 16]) -> bool {
 pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
     let mut roots = Vec::new();
     let mut source_ids = FxHashMap::default();
+    let mut snapshot_names = FxHashMap::default();
     for entry in entries {
+        if entry.key.item_type == BTRFS_ITEM_ROOT_REF {
+            if let std::collections::hash_map::Entry::Vacant(slot) =
+                snapshot_names.entry(entry.key.offset)
+                && let Ok(root_ref) = parse_root_ref(&entry.data)
+            {
+                slot.insert(root_ref.name);
+            }
+            continue;
+        }
         if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
             continue;
         }
@@ -1656,18 +1666,10 @@ pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
         // Find the source subvolume by matching parent_uuid to uuid.
         let source_id = source_ids.get(&root.parent_uuid).copied().unwrap_or(0);
 
-        // Find matching ROOT_REF for the snapshot name
-        let name = entries
-            .iter()
-            .find_map(|e| {
-                if e.key.item_type == BTRFS_ITEM_ROOT_REF && e.key.offset == id {
-                    let rref = parse_root_ref(&e.data).ok()?;
-                    Some(String::from_utf8_lossy(&rref.name).into_owned())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| format!("snap-{id}"));
+        let name = snapshot_names.get(&id).map_or_else(
+            || format!("snap-{id}"),
+            |name| String::from_utf8_lossy(name).into_owned(),
+        );
 
         snapshots.push(BtrfsSnapshot {
             id,
@@ -20033,6 +20035,60 @@ mod tests {
         let snapshots = enumerate_snapshots(&entries);
         assert_eq!(snapshots.len(), 1);
         assert_eq!(snapshots[0].source_id, 301);
+    }
+
+    #[test]
+    fn enumerate_snapshots_uses_first_valid_root_ref_name() {
+        let source_uuid = [5_u8; 16];
+        let mut malformed_ref = make_root_ref_data(300, b"broken");
+        malformed_ref.truncate(20);
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 7,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 400,
+                },
+                data: malformed_ref,
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 8,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 400,
+                },
+                data: make_root_ref_data(300, &[0xff, b'x']),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 9,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 400,
+                },
+                data: make_root_ref_data(300, b"later-valid"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 300,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x1000, 10, 0, source_uuid, [0; 16]),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 400,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x2000, 15, 1, [6; 16], source_uuid),
+            },
+        ];
+
+        let snapshots = enumerate_snapshots(&entries);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].source_id, 300);
+        assert_eq!(snapshots[0].name, "\u{fffd}x");
     }
 
     #[test]

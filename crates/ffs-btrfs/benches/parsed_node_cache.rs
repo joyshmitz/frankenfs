@@ -26,6 +26,7 @@ use ffs_btrfs::{
     walk_tree_range_borrowed_with_nodes, walk_tree_range_parallel_with_nodes,
     walk_tree_range_with_nodes, walk_tree_with_nodes,
 };
+use rustc_hash::FxHashMap;
 use std::collections::HashMap;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -698,6 +699,55 @@ fn frozen_linear_snapshot_enumeration(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSn
     snapshots
 }
 
+fn frozen_linear_snapshot_name_enumeration(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
+    let mut roots = Vec::new();
+    let mut source_ids = FxHashMap::default();
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+            continue;
+        }
+        if let Ok(root) = parse_root_item(&entry.data) {
+            if root.uuid.iter().any(|&byte| byte != 0) {
+                source_ids.entry(root.uuid).or_insert(entry.key.objectid);
+            }
+            roots.push((entry.key.objectid, root));
+        }
+    }
+
+    let mut snapshots = Vec::new();
+    for (id, root) in roots {
+        if id < BTRFS_FIRST_FREE_OBJECTID || !root.parent_uuid.iter().any(|&byte| byte != 0) {
+            continue;
+        }
+
+        let source_id = source_ids.get(&root.parent_uuid).copied().unwrap_or(0);
+        let name = entries
+            .iter()
+            .find_map(|candidate| {
+                if candidate.key.item_type == BTRFS_ITEM_ROOT_REF && candidate.key.offset == id {
+                    let root_ref = parse_root_ref(&candidate.data).ok()?;
+                    Some(String::from_utf8_lossy(&root_ref.name).into_owned())
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| format!("snap-{id}"));
+
+        snapshots.push(BtrfsSnapshot {
+            id,
+            source_id,
+            name,
+            generation: root.generation,
+            uuid: root.uuid,
+            parent_uuid: root.parent_uuid,
+            bytenr: root.bytenr,
+            level: root.level,
+        });
+    }
+
+    snapshots
+}
+
 fn snapshot_uuid(id: u64) -> [u8; 16] {
     let mut uuid = [0_u8; 16];
     uuid[..8].copy_from_slice(&id.to_le_bytes());
@@ -716,6 +766,36 @@ fn snapshot_catalog(count: u64) -> Vec<BtrfsLeafEntry> {
     let first_source = BTRFS_FIRST_FREE_OBJECTID;
     let first_snapshot = first_source + count;
     let mut entries = Vec::with_capacity(usize::try_from(count * 2).expect("fixture size fits"));
+    for source_id in first_source..first_source + count {
+        entries.push(snapshot_root_item(
+            source_id,
+            snapshot_uuid(source_id),
+            [0; 16],
+        ));
+    }
+    for offset in 0..count {
+        let snapshot_id = first_snapshot + offset;
+        let source_id = first_source + offset;
+        entries.push(snapshot_root_item(
+            snapshot_id,
+            snapshot_uuid(snapshot_id),
+            snapshot_uuid(source_id),
+        ));
+    }
+    entries
+}
+
+fn named_snapshot_catalog(count: u64) -> Vec<BtrfsLeafEntry> {
+    let first_source = BTRFS_FIRST_FREE_OBJECTID;
+    let first_snapshot = first_source + count;
+    let mut entries = Vec::with_capacity(usize::try_from(count * 3).expect("fixture size fits"));
+    for snapshot_id in first_snapshot..first_snapshot + count {
+        entries.push(subvolume_root_ref(
+            5,
+            snapshot_id,
+            format!("catalog-{snapshot_id}").as_bytes(),
+        ));
+    }
     for source_id in first_source..first_source + count {
         entries.push(snapshot_root_item(
             source_id,
@@ -804,11 +884,141 @@ fn bench_snapshot_source_uuid_index(c: &mut Criterion) {
     group.finish();
 }
 
+fn assert_snapshot_name_enumeration_isomorphic(entries: &[BtrfsLeafEntry]) {
+    let expected = frozen_linear_snapshot_name_enumeration(entries);
+    assert_eq!(frozen_linear_snapshot_name_enumeration(entries), expected);
+    assert_eq!(enumerate_snapshots(entries), expected);
+}
+
+fn frozen_linear_snapshot_names(entries: &[BtrfsLeafEntry], ids: &[u64]) -> Vec<String> {
+    ids.iter()
+        .map(|id| {
+            entries
+                .iter()
+                .find_map(|candidate| {
+                    if candidate.key.item_type == BTRFS_ITEM_ROOT_REF && candidate.key.offset == *id
+                    {
+                        let root_ref = parse_root_ref(&candidate.data).ok()?;
+                        Some(String::from_utf8_lossy(&root_ref.name).into_owned())
+                    } else {
+                        None
+                    }
+                })
+                .unwrap_or_else(|| format!("snap-{id}"))
+        })
+        .collect()
+}
+
+fn indexed_snapshot_names(entries: &[BtrfsLeafEntry], ids: &[u64]) -> Vec<String> {
+    let mut names = FxHashMap::default();
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_REF {
+            continue;
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = names.entry(entry.key.offset)
+            && let Ok(root_ref) = parse_root_ref(&entry.data)
+        {
+            slot.insert(root_ref.name);
+        }
+    }
+
+    ids.iter()
+        .map(|id| {
+            names.get(id).map_or_else(
+                || format!("snap-{id}"),
+                |name| String::from_utf8_lossy(name).into_owned(),
+            )
+        })
+        .collect()
+}
+
+fn assert_snapshot_name_lookup_isomorphic(entries: &[BtrfsLeafEntry], ids: &[u64]) {
+    let expected = frozen_linear_snapshot_names(entries, ids);
+    assert_eq!(frozen_linear_snapshot_names(entries, ids), expected);
+    assert_eq!(indexed_snapshot_names(entries, ids), expected);
+}
+
+fn bench_snapshot_root_ref_index(c: &mut Criterion) {
+    assert_snapshot_name_enumeration_isomorphic(&[]);
+    assert_snapshot_name_lookup_isomorphic(&[], &[]);
+    assert_snapshot_name_enumeration_isomorphic(&[snapshot_root_item(
+        256,
+        snapshot_uuid(256),
+        [0; 16],
+    )]);
+
+    let source_uuid = snapshot_uuid(300);
+    let named = [
+        snapshot_root_item(300, source_uuid, [0; 16]),
+        snapshot_root_item(400, snapshot_uuid(400), source_uuid),
+        subvolume_root_ref(5, 400, b"named-snapshot"),
+    ];
+    assert_snapshot_name_enumeration_isomorphic(&named);
+    assert_snapshot_name_lookup_isomorphic(&named, &[400]);
+
+    let mut malformed = subvolume_root_ref(5, 401, b"broken");
+    malformed.data.truncate(20);
+    let first_valid = [
+        malformed,
+        subvolume_root_ref(7, 401, &[0xff, b'x']),
+        subvolume_root_ref(9, 401, b"later-valid"),
+        snapshot_root_item(300, source_uuid, [0; 16]),
+        snapshot_root_item(401, snapshot_uuid(401), source_uuid),
+    ];
+    assert_snapshot_name_enumeration_isomorphic(&first_valid);
+    assert_snapshot_name_lookup_isomorphic(&first_valid, &[401]);
+
+    let missing = [
+        snapshot_root_item(300, source_uuid, [0; 16]),
+        snapshot_root_item(402, snapshot_uuid(402), source_uuid),
+    ];
+    assert_snapshot_name_enumeration_isomorphic(&missing);
+    assert_snapshot_name_lookup_isomorphic(&missing, &[402]);
+
+    let entries = named_snapshot_catalog(4096);
+    let first_snapshot = BTRFS_FIRST_FREE_OBJECTID + 4096;
+    let snapshot_ids: Vec<_> = (first_snapshot..first_snapshot + 4096).collect();
+    assert_snapshot_name_enumeration_isomorphic(&entries);
+    assert_snapshot_name_lookup_isomorphic(&entries, &snapshot_ids);
+
+    let mut group = c.benchmark_group("btrfs_snapshot_root_ref_index_4096");
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function("linear_control_a", |b| {
+        b.iter(|| {
+            black_box(frozen_linear_snapshot_names(
+                black_box(entries.as_slice()),
+                black_box(snapshot_ids.as_slice()),
+            ))
+        });
+    });
+    group.bench_function("linear_control_b", |b| {
+        b.iter(|| {
+            black_box(frozen_linear_snapshot_names(
+                black_box(entries.as_slice()),
+                black_box(snapshot_ids.as_slice()),
+            ))
+        });
+    });
+    group.bench_function("root_ref_indexed", |b| {
+        b.iter(|| {
+            black_box(indexed_snapshot_names(
+                black_box(entries.as_slice()),
+                black_box(snapshot_ids.as_slice()),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     parsed_node_cache,
     bench_parsed_node_cache,
     bench_leaf_cache_admission,
     bench_subvolume_root_ref_index,
-    bench_snapshot_source_uuid_index
+    bench_snapshot_source_uuid_index,
+    bench_snapshot_root_ref_index
 );
 criterion_main!(parsed_node_cache);
