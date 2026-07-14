@@ -10,7 +10,7 @@ use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::{FfsError, Result as FfsResult};
 use ffs_mvcc::sharded::ShardedMvccStore;
 use ffs_mvcc::{
-    BlockVersionStats, CommitError, EbrVersionStats, MvccStore, Transaction,
+    BlockVersionStats, CommitError, EbrVersionStats, MergeProof, MvccStore, Transaction,
     TransactionOutcomeStats, TxnAbortReason,
 };
 use ffs_types::{BlockNumber, CommitSeq, Snapshot};
@@ -477,6 +477,46 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
 
         let mut txn = self.store.begin();
         txn.stage_write(block, data.to_vec());
+        let commit_seq = self
+            .store
+            .commit(txn)
+            .map_err(|error| FfsError::Format(error.to_string()))?;
+        self.store.prune_after_commit_if_due(commit_seq);
+        Ok(())
+    }
+
+    fn rmw_block(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        disjoint_ranges: &[(usize, usize)],
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> FfsResult<()>,
+    ) -> FfsResult<()> {
+        if self.reads_base_directly() {
+            return Err(FfsError::UnsupportedFeature(
+                "unregistered MVCC block device is read-only".to_owned(),
+            ));
+        }
+        // Begin the transaction FIRST, then read the base block AT the transaction's
+        // snapshot (a read taken beforehand could observe an older version than the
+        // txn — see `rmw_commit_block_with_proof`'s contract). When the store holds
+        // no version at the snapshot, the block is still on the base device.
+        let mut txn = self.store.begin();
+        let snapshot = txn.snapshot();
+        let mut data = match self.store.read_visible_block_buf(block, snapshot) {
+            Some(buf) => buf.as_slice().to_vec(),
+            None => self.base.read_block(cx, block)?.into_inner(),
+        };
+        patch(&mut data)?;
+        // Empty hint → identical to `write_block` (default `Unsafe` proof, no merge).
+        // A non-empty hint stages a range-scoped `IndependentKeys` proof so writers
+        // touching disjoint ranges of this block MERGE instead of FCW-conflicting.
+        let proof = if disjoint_ranges.is_empty() {
+            MergeProof::Unsafe
+        } else {
+            MergeProof::independent_keys(disjoint_ranges)
+        };
+        txn.stage_write_with_proof(block, data, proof);
         let commit_seq = self
             .store
             .commit(txn)

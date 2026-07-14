@@ -168,6 +168,21 @@ impl MergeProof {
         }
     }
 
+    /// `IndependentKeys` proof over a set of `(start, len)` byte ranges — the
+    /// multi-range form of [`Self::independent_key_range`]. Used for a block whose
+    /// concurrent writers each touch a distinct fixed-size record slot (e.g. one
+    /// group descriptor within the shared GDT block), so disjoint-slot writers
+    /// merge instead of first-committer-wins conflicting.
+    #[must_use]
+    pub fn independent_keys(ranges: &[(usize, usize)]) -> Self {
+        Self::IndependentKeys {
+            touched_ranges: ranges
+                .iter()
+                .map(|&(start, len)| MergeByteRange::new(start, len))
+                .collect(),
+        }
+    }
+
     #[must_use]
     pub fn non_overlapping_extent_range(start: usize, len: usize) -> Self {
         Self::NonOverlappingExtents {

@@ -63468,6 +63468,63 @@ mod tests {
 
     #[cfg(feature = "bhh0i_sharded_alloc")]
     #[test]
+    fn ext4_sharded_gdt_descriptor_disjoint_writes_merge_bd_bhh0i() {
+        // bd-bhh0i slice 4: the sharded inode/block alloc persists a group
+        // descriptor per-op via `dev.rmw_block(gdt_block, [(off, desc_size)], ..)`,
+        // which stages the shared GDT block under a per-descriptor
+        // `MergeProof::independent_keys` proof. Two concurrent creates in DIFFERENT
+        // groups patch DISJOINT descriptor slots of the same GDT block, so they must
+        // MERGE; under the pre-slice-4 default `Unsafe` proof they FCW-conflict.
+        // Drives the store as `rmw_block` does: an overlapping stale-snapshot pair
+        // patching two disjoint `desc_size`-byte slots of one block.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let geo = FsGeometry::from_superblock(fs.ext4_superblock().expect("ext4 superblock"));
+        let block_size = geo.block_size as usize;
+        // Two adjacent group-descriptor slots (32 or 64 bytes) in the GDT block.
+        let desc_size = 32usize;
+        let (off_a, off_b) = (0usize, desc_size);
+        assert!(off_b + desc_size <= block_size);
+
+        let run = |block: BlockNumber, b_proof: MergeProof| -> bool {
+            let base = vec![0x5Au8; block_size];
+            let mut v0 = fs.mvcc_store.begin();
+            v0.stage_write(block, base.clone());
+            fs.mvcc_store.commit(v0).expect("base version commits");
+
+            let mut a = fs.mvcc_store.begin();
+            let mut b = fs.mvcc_store.begin();
+            let mut block_a = base.clone();
+            block_a[off_a..off_a + desc_size].fill(0xA1);
+            a.stage_write_with_proof(
+                block,
+                block_a,
+                MergeProof::independent_keys(&[(off_a, desc_size)]),
+            );
+            let mut block_b = base.clone();
+            block_b[off_b..off_b + desc_size].fill(0xB2);
+            b.stage_write_with_proof(block, block_b, b_proof);
+
+            fs.mvcc_store.commit(a).expect("first writer commits");
+            fs.mvcc_store.commit(b).is_ok()
+        };
+
+        assert!(
+            run(
+                BlockNumber(910_001),
+                MergeProof::independent_keys(&[(off_b, desc_size)])
+            ),
+            "disjoint group-descriptor writes under independent_keys must MERGE"
+        );
+        assert!(
+            !run(BlockNumber(910_002), MergeProof::Unsafe),
+            "disjoint group-descriptor writes under the default Unsafe proof must FCW-conflict"
+        );
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
     fn ext4_sharded_alloc_dir_block_grows_bd_bhh0i() {
         // The dir-growth primitive returns a distinct block per call and debits
         // total_free().blocks by one.

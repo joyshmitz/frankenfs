@@ -2150,98 +2150,106 @@ fn persist_group_desc_force_with_bitmap_overrides(
             .checked_add(gdt_block_idx as u64)
             .ok_or_else(|| FfsError::InvalidGeometry("GDT block number overflow".into()))?,
     );
-    let raw = dev.read_block(cx, block_num)?;
-    let mut buf = raw.into_inner();
 
-    // Build a temporary Ext4GroupDesc with updated counters and serialize.
-    // Read existing descriptor to preserve fields we don't track.
-    let existing = Ext4GroupDesc::parse_from_bytes(&buf[offset_in_block..], pctx.desc_size)
-        .map_err(|e| FfsError::Format(format!("GDT parse: {e}")))?;
-    let existing_flags = existing.flags;
-    let existing_block_bitmap_csum = existing.block_bitmap_csum;
-    let existing_inode_bitmap_csum = existing.inode_bitmap_csum;
-    let block_bitmap_written = block_bitmap_override.is_some();
-    let inode_bitmap = inode_bitmap_override.map(|override_| override_.bitmap);
+    // The GDT block is SHARED across every group whose descriptor lives in it: a
+    // group descriptor is a `ds`-byte slot at `offset_in_block`, and this call
+    // patches ONLY that slot. So the read-modify-write differs from the current
+    // block only within `[offset_in_block, offset_in_block + ds)` — hand that range
+    // to `rmw_block` so an MVCC-backed device stages it under a per-descriptor
+    // merge proof: two concurrent creates in DIFFERENT groups sharing this GDT
+    // block then MERGE instead of first-committer-wins conflicting (bd-bhh0i slice
+    // 4, the remaining parallel-create conflict). Non-MVCC / externally-serialized
+    // devices ignore the hint and do a plain read-modify-write (byte-identical).
+    // The closure runs on the base block the device read at its own snapshot.
+    dev.rmw_block(cx, block_num, &[(offset_in_block, ds)], &mut |buf| {
+        // Build a temporary Ext4GroupDesc with updated counters and serialize.
+        // Read existing descriptor to preserve fields we don't track.
+        let existing = Ext4GroupDesc::parse_from_bytes(&buf[offset_in_block..], pctx.desc_size)
+            .map_err(|e| FfsError::Format(format!("GDT parse: {e}")))?;
+        let existing_flags = existing.flags;
+        let existing_block_bitmap_csum = existing.block_bitmap_csum;
+        let existing_inode_bitmap_csum = existing.inode_bitmap_csum;
+        let block_bitmap_written = block_bitmap_override.is_some();
+        let inode_bitmap = inode_bitmap_override.map(|override_| override_.bitmap);
 
-    let mut updated = Ext4GroupDesc {
-        free_blocks_count: stats.free_blocks,
-        free_inodes_count: stats.free_inodes,
-        used_dirs_count: stats.used_dirs,
-        ..existing
-    };
+        let mut updated = Ext4GroupDesc {
+            free_blocks_count: stats.free_blocks,
+            free_inodes_count: stats.free_inodes,
+            used_dirs_count: stats.used_dirs,
+            ..existing
+        };
 
-    if pctx.has_metadata_csum {
-        // Only re-stamp a bitmap's descriptor checksum when THAT bitmap actually
-        // changed this op (its override is `Some`). When it is unchanged, the
-        // descriptor parsed into `existing` (copied via `..existing`) already
-        // carries the correct checksum, so preserving it is sound — every bitmap
-        // mutation routes through a `Some` override that re-stamps it, so the
-        // on-disk checksum is always kept in sync with the bitmap content.
-        // This removes a per-op BASE read of the unchanged bitmap block that was
-        // pure waste: an inode alloc/free (block_bitmap_override=None) re-read the
-        // group block-bitmap block (e.g. block 51) on EVERY op only to recompute
-        // a byte-identical checksum. Measured: ~2 base preads/op on the delete
-        // path (the dominant amplification, ~93% of delbench preads). bd-bmpcsum.
-        if let Some(block_bitmap) = block_bitmap_override {
-            stamp_bitmap_checksum_from_override(
-                BitmapChecksumKind::Block,
-                block_bitmap,
-                existing_block_bitmap_csum,
-                existing_flags & GD_FLAG_BLOCK_UNINIT != 0,
-                pctx,
-                &mut updated,
+        if pctx.has_metadata_csum {
+            // Only re-stamp a bitmap's descriptor checksum when THAT bitmap actually
+            // changed this op (its override is `Some`). When it is unchanged, the
+            // descriptor parsed into `existing` (copied via `..existing`) already
+            // carries the correct checksum, so preserving it is sound — every bitmap
+            // mutation routes through a `Some` override that re-stamps it, so the
+            // on-disk checksum is always kept in sync with the bitmap content.
+            // This removes a per-op BASE read of the unchanged bitmap block that was
+            // pure waste: an inode alloc/free (block_bitmap_override=None) re-read the
+            // group block-bitmap block (e.g. block 51) on EVERY op only to recompute
+            // a byte-identical checksum. Measured: ~2 base preads/op on the delete
+            // path (the dominant amplification, ~93% of delbench preads). bd-bmpcsum.
+            if let Some(block_bitmap) = block_bitmap_override {
+                stamp_bitmap_checksum_from_override(
+                    BitmapChecksumKind::Block,
+                    block_bitmap,
+                    existing_block_bitmap_csum,
+                    existing_flags & GD_FLAG_BLOCK_UNINIT != 0,
+                    pctx,
+                    &mut updated,
+                );
+            }
+            if let Some(inode_bitmap) = inode_bitmap_override {
+                stamp_bitmap_checksum_from_override(
+                    BitmapChecksumKind::Inode,
+                    inode_bitmap,
+                    existing_inode_bitmap_csum,
+                    existing_flags & GD_FLAG_INODE_UNINIT != 0,
+                    pctx,
+                    &mut updated,
+                );
+            }
+        }
+
+        // bd-0ta4z: once a group's bitmap is written explicitly, the group is no
+        // longer "uninitialized" — clear the matching UNINIT flag so e2fsck reads
+        // the on-disk bitmap as authoritative instead of recomputing it as all-free.
+        // For inode allocations also shrink `itable_unused` (the count of inodes at
+        // the end of the table never yet used) so the freshly allocated inode leaves
+        // the descriptor's "unused inodes" tail. It is monotonic — taken as a `min`
+        // so it never grows back when inodes are freed (the inode table stays
+        // initialized up to the high-water mark).
+        if let Some(ibitmap) = inode_bitmap {
+            updated.flags &= !GD_FLAG_INODE_UNINIT;
+            if let Some(highest_used) = highest_set_bit_index(ibitmap, pctx.inodes_per_group) {
+                let unused = pctx
+                    .inodes_per_group
+                    .saturating_sub(highest_used.saturating_add(1));
+                updated.itable_unused = updated.itable_unused.min(unused);
+            }
+        }
+        if block_bitmap_written {
+            updated.flags &= !GD_FLAG_BLOCK_UNINIT;
+        }
+
+        updated
+            .write_to_bytes(&mut buf[offset_in_block..], pctx.desc_size)
+            .map_err(|e| FfsError::Format(format!("GDT write: {e}")))?;
+
+        if pctx.group_desc_checksum_kind != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
+            ffs_ondisk::ext4::stamp_group_desc_checksum(
+                &mut buf[offset_in_block..offset_in_block + ds],
+                &pctx.uuid,
+                pctx.csum_seed,
+                group.0,
+                pctx.desc_size,
+                pctx.group_desc_checksum_kind,
             );
         }
-        if let Some(inode_bitmap) = inode_bitmap_override {
-            stamp_bitmap_checksum_from_override(
-                BitmapChecksumKind::Inode,
-                inode_bitmap,
-                existing_inode_bitmap_csum,
-                existing_flags & GD_FLAG_INODE_UNINIT != 0,
-                pctx,
-                &mut updated,
-            );
-        }
-    }
-
-    // bd-0ta4z: once a group's bitmap is written explicitly, the group is no
-    // longer "uninitialized" — clear the matching UNINIT flag so e2fsck reads
-    // the on-disk bitmap as authoritative instead of recomputing it as all-free.
-    // For inode allocations also shrink `itable_unused` (the count of inodes at
-    // the end of the table never yet used) so the freshly allocated inode leaves
-    // the descriptor's "unused inodes" tail. It is monotonic — taken as a `min`
-    // so it never grows back when inodes are freed (the inode table stays
-    // initialized up to the high-water mark).
-    if let Some(ibitmap) = inode_bitmap {
-        updated.flags &= !GD_FLAG_INODE_UNINIT;
-        if let Some(highest_used) = highest_set_bit_index(ibitmap, pctx.inodes_per_group) {
-            let unused = pctx
-                .inodes_per_group
-                .saturating_sub(highest_used.saturating_add(1));
-            updated.itable_unused = updated.itable_unused.min(unused);
-        }
-    }
-    if block_bitmap_written {
-        updated.flags &= !GD_FLAG_BLOCK_UNINIT;
-    }
-
-    updated
-        .write_to_bytes(&mut buf[offset_in_block..], pctx.desc_size)
-        .map_err(|e| FfsError::Format(format!("GDT write: {e}")))?;
-
-    if pctx.group_desc_checksum_kind != ffs_ondisk::ext4::Ext4GroupDescChecksumKind::None {
-        ffs_ondisk::ext4::stamp_group_desc_checksum(
-            &mut buf[offset_in_block..offset_in_block + ds],
-            &pctx.uuid,
-            pctx.csum_seed,
-            group.0,
-            pctx.desc_size,
-            pctx.group_desc_checksum_kind,
-        );
-    }
-
-    dev.write_block(cx, block_num, &buf)?;
-    Ok(())
+        Ok(())
+    })
 }
 
 fn stamp_bitmap_checksum_from_override(

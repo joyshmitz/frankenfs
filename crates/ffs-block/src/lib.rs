@@ -932,6 +932,32 @@ pub trait BlockDevice: Send + Sync {
     /// Write a block by number. `data.len()` MUST equal `block_size()`.
     fn write_block(&self, cx: &Cx, block: BlockNumber, data: &[u8]) -> Result<()>;
 
+    /// Read-modify-write one block: read it, hand the mutable block buffer to
+    /// `patch`, then write it back. `disjoint_ranges` are the `(offset, len)` byte
+    /// ranges `patch` is expected to touch — a hint that the write differs from the
+    /// current block ONLY within those ranges (the rest is an unchanged copy of
+    /// what was read). An MVCC-backed device uses the hint to read the base AT ITS
+    /// TRANSACTION SNAPSHOT and stage the write under a range-scoped merge proof, so
+    /// two writers touching DISJOINT ranges of the same block MERGE instead of
+    /// first-committer-wins conflicting. The default performs a plain
+    /// read-modify-write and ignores the hint — correct for every non-MVCC or
+    /// externally-serialized device (the bytes written are identical; the hint is a
+    /// pure concurrency optimization). Reading the base and staging the write in one
+    /// call is what lets an MVCC device keep them snapshot-consistent, which a
+    /// separate `read_block` then `write_block` cannot guarantee under concurrency.
+    fn rmw_block(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        disjoint_ranges: &[(usize, usize)],
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        let _ = disjoint_ranges;
+        let mut data = self.read_block(cx, block)?.into_inner();
+        patch(&mut data)?;
+        self.write_block(cx, block, &data)
+    }
+
     /// Write a contiguous run of blocks starting at `start`. `data` holds the
     /// concatenated block contents (`data.len()` MUST be a multiple of
     /// `block_size()`); block `start + i` receives `data[i*bs .. (i+1)*bs]`.
