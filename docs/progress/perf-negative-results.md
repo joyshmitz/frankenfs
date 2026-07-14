@@ -13,6 +13,30 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## ext4 metadata checksum path is already optimal (crc32c hardware-accelerated; simd warm is diagnostic-only) - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — the ext4 metadata-checksum hot path (every inode / group-desc /
+dir-entry / extent-node write) is not a lever.
+
+Investigated because a peer accelerated btrfs's crc32c (652bee53) and ext4 computes a
+crc32c metadata checksum on every metadata write (a hot DEFAULT path). Findings:
+- **crc32c math already hardware-accelerated.** `ext4_chksum` (ffs-ondisk/ext4.rs:34)
+  routes through `ffs_types::crc32c_append`, which delegates to the `crc32c`
+  DEPENDENCY crate (self-detecting SSE4.2 / aarch64-CRC internally). `#![forbid(unsafe_code)]`
+  bars us from writing our own intrinsic path anyway; the dep already provides the
+  fast one. Nothing to accelerate.
+- **the per-call `simd_capabilities()` warm is diagnostic-only, and sub-noise.**
+  `crc32c`/`crc32c_append`/`blake3_hash` each call `let _ = simd_capabilities();`
+  (an `OnceLock::get_or_init`). But `SimdCapabilities` is CONSUMED nowhere in
+  production for dispatch (grep: only its own one-time `tracing::info!` log +
+  `#[cfg(test)]`); the checksum crates self-detect. So the warm is purely the
+  one-time capability log. Under release-perf LTO (`codegen-units = 1`) its
+  initialized fast path inlines to a hot acquire-load (sub-ns), dwarfed by the crc
+  math (~tens of ns for a 256-byte inode). Removing it would trade the one-time
+  diagnostic log for a sub-noise gain (the fd678afe "<0.5% of the op = sub-noise"
+  rule) — not worth the behavior change. Retry predicate: only if a profile shows the
+  warm as a non-trivial fraction of a metadata-write op (it will not under LTO).
+
 ## Extent-meta double-walk REJECTED (already fast-pathed) + sharded `from_superblock` vein closed - 2026-07-14 (REJECT / BOUND, no code)
 
 Status: REJECT (the extent-meta double-walk candidate from the previous entry is not
