@@ -13,6 +13,20 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## ext4_setattr (chmod/chown/utimes): read-once / write-once lean - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed a less-benched metadata-mutation op; already lean. No lever.
+
+`ext4_setattr` does exactly one `read_inode_with_scope`, applies the requested fields in
+place (mode preserves the type bits; uid/gid direct; atime→touch_atime,
+mtime→touch_mtime_ctime — all O(1)), runs cheap immutable/verity/append guards, then one
+`write_inode`. No redundant read, no re-read, no recompute for the common
+chmod/chown/utimes case; both the read and write halves are already optimized (AttrOnly/
+Arc-share reads, make_mut write). The only heavy branch is `attrs.size` (truncate), which
+frees blocks under the alloc lock — inherent work + peer-adjacent (bd-k2wc7 truncate).
+Not a lever. Confirms the metadata-mutation ops (create alloc-lean, setattr read-once/
+write-once) are lean, matching the create-path "alloc-LEAN" bound.
+
 ## Block-cache locking: sharded per-shard Mutex is the deliberate benched choice - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed the per-block-read cache lock; a deliberate, already-benched
