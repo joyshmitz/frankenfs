@@ -18,11 +18,12 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
+    BTRFS_FIRST_FREE_OBJECTID, BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_ROOT_ITEM,
+    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE, BTRFS_ROOT_SUBVOL_RDONLY,
     BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch, BtrfsParsedNode, BtrfsStripe,
-    parse_btrfs_tree_node, walk_tree_parallel_with_nodes, walk_tree_range,
-    walk_tree_range_borrowed_with_nodes, walk_tree_range_parallel_with_nodes,
-    walk_tree_range_with_nodes, walk_tree_with_nodes,
+    BtrfsSubvolume, enumerate_subvolumes, parse_btrfs_tree_node, parse_root_item, parse_root_ref,
+    walk_tree_parallel_with_nodes, walk_tree_range, walk_tree_range_borrowed_with_nodes,
+    walk_tree_range_parallel_with_nodes, walk_tree_range_with_nodes, walk_tree_with_nodes,
 };
 use std::collections::HashMap;
 use std::hint::black_box;
@@ -483,9 +484,167 @@ fn bench_leaf_cache_admission(c: &mut Criterion) {
     group.finish();
 }
 
+fn frozen_linear_subvolume_enumeration(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
+    let mut subvols = Vec::new();
+
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
+            continue;
+        }
+        let id = entry.key.objectid;
+        if id < BTRFS_FIRST_FREE_OBJECTID {
+            continue;
+        }
+        let Ok(root) = parse_root_item(&entry.data) else {
+            continue;
+        };
+
+        let (parent_id, name) = entries
+            .iter()
+            .find_map(|candidate| {
+                if candidate.key.item_type == BTRFS_ITEM_ROOT_REF && candidate.key.offset == id {
+                    let root_ref = parse_root_ref(&candidate.data).ok()?;
+                    Some((
+                        candidate.key.objectid,
+                        String::from_utf8_lossy(&root_ref.name).into_owned(),
+                    ))
+                } else {
+                    None
+                }
+            })
+            .unwrap_or_else(|| (0, format!("subvol-{id}")));
+
+        subvols.push(BtrfsSubvolume {
+            id,
+            parent_id,
+            name,
+            generation: root.generation,
+            read_only: root.flags & BTRFS_ROOT_SUBVOL_RDONLY != 0,
+            bytenr: root.bytenr,
+            level: root.level,
+        });
+    }
+
+    subvols
+}
+
+fn subvolume_root_item(id: u64) -> BtrfsLeafEntry {
+    let mut data = vec![0_u8; 279];
+    data[160..168].copy_from_slice(&id.to_le_bytes());
+    data[168..176].copy_from_slice(&256_u64.to_le_bytes());
+    data[176..184].copy_from_slice(&(id * u64::from(NODESIZE)).to_le_bytes());
+    data[208..216].copy_from_slice(&(id & 1).to_le_bytes());
+    data[216..220].copy_from_slice(&1_u32.to_le_bytes());
+    data[238] = 0;
+    data[239..247].copy_from_slice(&id.to_le_bytes());
+    BtrfsLeafEntry {
+        key: BtrfsKey {
+            objectid: id,
+            item_type: BTRFS_ITEM_ROOT_ITEM,
+            offset: 0,
+        },
+        data,
+    }
+}
+
+fn subvolume_root_ref(parent_id: u64, child_id: u64, name: &[u8]) -> BtrfsLeafEntry {
+    let mut data = Vec::with_capacity(18 + name.len());
+    data.extend_from_slice(&256_u64.to_le_bytes());
+    data.extend_from_slice(&0_u64.to_le_bytes());
+    data.extend_from_slice(
+        &u16::try_from(name.len())
+            .expect("benchmark root-ref name must fit u16")
+            .to_le_bytes(),
+    );
+    data.extend_from_slice(name);
+    BtrfsLeafEntry {
+        key: BtrfsKey {
+            objectid: parent_id,
+            item_type: BTRFS_ITEM_ROOT_REF,
+            offset: child_id,
+        },
+        data,
+    }
+}
+
+fn subvolume_catalog(count: u64) -> Vec<BtrfsLeafEntry> {
+    let mut entries = Vec::with_capacity(usize::try_from(count * 2).expect("fixture size fits"));
+    for id in BTRFS_FIRST_FREE_OBJECTID..BTRFS_FIRST_FREE_OBJECTID + count {
+        entries.push(subvolume_root_ref(
+            5,
+            id,
+            format!("catalog-{id}").as_bytes(),
+        ));
+    }
+    for id in BTRFS_FIRST_FREE_OBJECTID..BTRFS_FIRST_FREE_OBJECTID + count {
+        entries.push(subvolume_root_item(id));
+    }
+    entries
+}
+
+fn assert_subvolume_enumeration_isomorphic(entries: &[BtrfsLeafEntry]) {
+    let expected = frozen_linear_subvolume_enumeration(entries);
+    assert_eq!(frozen_linear_subvolume_enumeration(entries), expected);
+    assert_eq!(enumerate_subvolumes(entries), expected);
+}
+
+fn bench_subvolume_root_ref_index(c: &mut Criterion) {
+    assert_subvolume_enumeration_isomorphic(&[]);
+
+    let singleton = vec![
+        subvolume_root_ref(5, 256, b"singleton"),
+        subvolume_root_item(256),
+    ];
+    assert_subvolume_enumeration_isomorphic(&singleton);
+
+    let mut malformed = subvolume_root_ref(5, 257, b"broken");
+    malformed.data.truncate(20);
+    let first_valid = vec![
+        malformed,
+        subvolume_root_ref(7, 257, b"first-valid"),
+        subvolume_root_ref(9, 257, b"later-valid"),
+        subvolume_root_item(257),
+    ];
+    assert_subvolume_enumeration_isomorphic(&first_valid);
+
+    assert_subvolume_enumeration_isomorphic(&[subvolume_root_item(258)]);
+    assert_subvolume_enumeration_isomorphic(&[
+        subvolume_root_ref(5, 259, &[0xff, b'x']),
+        subvolume_root_item(259),
+    ]);
+
+    let entries = subvolume_catalog(4096);
+    assert_subvolume_enumeration_isomorphic(&entries);
+
+    let mut group = c.benchmark_group("btrfs_subvolume_root_ref_index_4096");
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function("linear_control_a", |b| {
+        b.iter(|| {
+            black_box(frozen_linear_subvolume_enumeration(black_box(
+                entries.as_slice(),
+            )))
+        });
+    });
+    group.bench_function("linear_control_b", |b| {
+        b.iter(|| {
+            black_box(frozen_linear_subvolume_enumeration(black_box(
+                entries.as_slice(),
+            )))
+        });
+    });
+    group.bench_function("indexed", |b| {
+        b.iter(|| black_box(enumerate_subvolumes(black_box(entries.as_slice()))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     parsed_node_cache,
     bench_parsed_node_cache,
-    bench_leaf_cache_admission
+    bench_leaf_cache_admission,
+    bench_subvolume_root_ref_index
 );
 criterion_main!(parsed_node_cache);

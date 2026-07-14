@@ -1566,6 +1566,18 @@ pub fn parse_inode_refs(data: &[u8]) -> Result<Vec<BtrfsInodeRef>, ParseError> {
 /// entries for objectids >= 256 (user subvolumes).
 #[must_use]
 pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
+    let mut root_refs = FxHashMap::default();
+    for entry in entries {
+        if entry.key.item_type != BTRFS_ITEM_ROOT_REF {
+            continue;
+        }
+        if let std::collections::hash_map::Entry::Vacant(slot) = root_refs.entry(entry.key.offset)
+            && let Ok(root_ref) = parse_root_ref(&entry.data)
+        {
+            slot.insert((entry.key.objectid, root_ref));
+        }
+    }
+
     let mut subvols = Vec::new();
 
     // Collect ROOT_ITEM entries for user subvolumes
@@ -1581,19 +1593,15 @@ pub fn enumerate_subvolumes(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSubvolume> {
             continue;
         };
 
-        // Find matching ROOT_REF for this subvolume
-        let (parent_id, name) = entries
-            .iter()
-            .find_map(|e| {
-                if e.key.item_type == BTRFS_ITEM_ROOT_REF && e.key.offset == id {
-                    let rref = parse_root_ref(&e.data).ok()?;
-                    let name = String::from_utf8_lossy(&rref.name).into_owned();
-                    Some((e.key.objectid, name))
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| (0, format!("subvol-{id}")));
+        let (parent_id, name) = root_refs.get(&id).map_or_else(
+            || (0, format!("subvol-{id}")),
+            |(parent_id, root_ref)| {
+                (
+                    *parent_id,
+                    String::from_utf8_lossy(&root_ref.name).into_owned(),
+                )
+            },
+        );
 
         subvols.push(BtrfsSubvolume {
             id,
@@ -19882,6 +19890,51 @@ mod tests {
         let subvols = enumerate_subvolumes(&entries);
         assert_eq!(subvols.len(), 1);
         assert_eq!(subvols[0].name, "subvol-601");
+    }
+
+    #[test]
+    fn enumerate_subvolumes_uses_first_valid_root_ref() {
+        let mut malformed_ref = make_root_ref_data(256, b"broken");
+        malformed_ref.truncate(20);
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 5,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 602,
+                },
+                data: malformed_ref,
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 7,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 602,
+                },
+                data: make_root_ref_data(256, b"first-valid"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 9,
+                    item_type: BTRFS_ITEM_ROOT_REF,
+                    offset: 602,
+                },
+                data: make_root_ref_data(256, b"later-valid"),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 602,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_data(0x6000, 22, 0),
+            },
+        ];
+
+        let subvols = enumerate_subvolumes(&entries);
+        assert_eq!(subvols.len(), 1);
+        assert_eq!(subvols[0].parent_id, 7);
+        assert_eq!(subvols[0].name, "first-valid");
     }
 
     // ── Snapshot enumeration tests ─────────────────────────────────
