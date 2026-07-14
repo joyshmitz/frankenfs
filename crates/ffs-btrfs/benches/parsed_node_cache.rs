@@ -18,16 +18,17 @@
 
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
-    BTRFS_FIRST_FREE_OBJECTID, BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_ROOT_ITEM,
-    BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE, BTRFS_ROOT_SUBVOL_RDONLY,
-    BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch, BtrfsParsedNode, BtrfsSnapshot,
-    BtrfsStripe, BtrfsSubvolume, enumerate_snapshots, enumerate_subvolumes, parse_btrfs_tree_node,
-    parse_root_item, parse_root_ref, walk_tree_parallel_with_nodes, walk_tree_range,
-    walk_tree_range_borrowed_with_nodes, walk_tree_range_parallel_with_nodes,
-    walk_tree_range_with_nodes, walk_tree_with_nodes,
+    BTRFS_FIRST_FREE_OBJECTID, BTRFS_HEADER_SIZE, BTRFS_ITEM_EXTENT_DATA, BTRFS_ITEM_INODE_ITEM,
+    BTRFS_ITEM_ROOT_ITEM, BTRFS_ITEM_ROOT_REF, BTRFS_ITEM_SIZE, BTRFS_KEY_PTR_SIZE,
+    BTRFS_ROOT_SUBVOL_RDONLY, BtrfsChunkEntry, BtrfsKey, BtrfsLeafEntry, BtrfsLeafEntryBatch,
+    BtrfsParsedNode, BtrfsSnapshot, BtrfsStripe, BtrfsSubvolume, SnapshotChangeType,
+    SnapshotDiffEntry, enumerate_snapshots, enumerate_subvolumes, parse_btrfs_tree_node,
+    parse_inode_item, parse_root_item, parse_root_ref, snapshot_diff_by_generation,
+    walk_tree_parallel_with_nodes, walk_tree_range, walk_tree_range_borrowed_with_nodes,
+    walk_tree_range_parallel_with_nodes, walk_tree_range_with_nodes, walk_tree_with_nodes,
 };
 use rustc_hash::FxHashMap;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::hint::black_box;
 use std::sync::Arc;
 use std::time::Duration;
@@ -1013,12 +1014,128 @@ fn bench_snapshot_root_ref_index(c: &mut Criterion) {
     group.finish();
 }
 
+fn snapshot_diff_inode_entry(objectid: u64, generation: u64) -> BtrfsLeafEntry {
+    let mut data = vec![0_u8; 160];
+    data[0..8].copy_from_slice(&generation.to_le_bytes());
+    BtrfsLeafEntry {
+        key: BtrfsKey {
+            objectid,
+            item_type: BTRFS_ITEM_INODE_ITEM,
+            offset: 0,
+        },
+        data,
+    }
+}
+
+fn snapshot_diff_catalog() -> (Vec<BtrfsLeafEntry>, Vec<BtrfsLeafEntry>) {
+    const COUNT: u64 = 4096;
+    const OVERLAP: u64 = 3072;
+
+    let older = (0..COUNT)
+        .map(|offset| snapshot_diff_inode_entry(BTRFS_FIRST_FREE_OBJECTID + offset, 10))
+        .collect();
+    let newer = (COUNT - OVERLAP..COUNT * 2 - OVERLAP)
+        .map(|offset| {
+            let generation = if offset & 1 == 0 { 11 } else { 10 };
+            snapshot_diff_inode_entry(BTRFS_FIRST_FREE_OBJECTID + offset, generation)
+        })
+        .collect();
+    (older, newer)
+}
+
+/// Frozen pre-change implementation: two membership/probe passes followed by
+/// a result sort. This remains the same-binary control for the ordered merge.
+fn frozen_sorted_snapshot_diff(
+    older_entries: &[BtrfsLeafEntry],
+    newer_entries: &[BtrfsLeafEntry],
+) -> Vec<SnapshotDiffEntry> {
+    let collect_inodes = |entries: &[BtrfsLeafEntry]| -> BTreeMap<u64, u64> {
+        entries
+            .iter()
+            .filter(|entry| entry.key.item_type == BTRFS_ITEM_INODE_ITEM)
+            .filter_map(|entry| {
+                let inode = parse_inode_item(&entry.data).ok()?;
+                Some((entry.key.objectid, inode.generation))
+            })
+            .collect()
+    };
+
+    let old_inodes = collect_inodes(older_entries);
+    let new_inodes = collect_inodes(newer_entries);
+    let mut diffs = Vec::new();
+
+    for &objectid in old_inodes.keys() {
+        if !new_inodes.contains_key(&objectid) {
+            diffs.push(SnapshotDiffEntry {
+                inode: objectid,
+                change_type: SnapshotChangeType::Deleted,
+            });
+        }
+    }
+    for (&objectid, &new_generation) in &new_inodes {
+        match old_inodes.get(&objectid) {
+            None => diffs.push(SnapshotDiffEntry {
+                inode: objectid,
+                change_type: SnapshotChangeType::Added,
+            }),
+            Some(&old_generation) if new_generation > old_generation => {
+                diffs.push(SnapshotDiffEntry {
+                    inode: objectid,
+                    change_type: SnapshotChangeType::Modified,
+                });
+            }
+            _ => {}
+        }
+    }
+    diffs.sort_by_key(|diff| diff.inode);
+    diffs
+}
+
+fn bench_snapshot_diff_ordered_merge(c: &mut Criterion) {
+    let (older, newer) = snapshot_diff_catalog();
+    let expected = frozen_sorted_snapshot_diff(&older, &newer);
+    assert_eq!(frozen_sorted_snapshot_diff(&older, &newer), expected);
+    assert_eq!(snapshot_diff_by_generation(&older, &newer), expected);
+
+    let mut group = c.benchmark_group("btrfs_snapshot_diff_ordered_merge_4096");
+    group
+        .sample_size(30)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(3));
+    group.bench_function("sorted_control_a", |b| {
+        b.iter(|| {
+            black_box(frozen_sorted_snapshot_diff(
+                black_box(older.as_slice()),
+                black_box(newer.as_slice()),
+            ))
+        });
+    });
+    group.bench_function("sorted_control_b", |b| {
+        b.iter(|| {
+            black_box(frozen_sorted_snapshot_diff(
+                black_box(older.as_slice()),
+                black_box(newer.as_slice()),
+            ))
+        });
+    });
+    group.bench_function("production", |b| {
+        b.iter(|| {
+            black_box(snapshot_diff_by_generation(
+                black_box(older.as_slice()),
+                black_box(newer.as_slice()),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     parsed_node_cache,
     bench_parsed_node_cache,
     bench_leaf_cache_admission,
     bench_subvolume_root_ref_index,
     bench_snapshot_source_uuid_index,
-    bench_snapshot_root_ref_index
+    bench_snapshot_root_ref_index,
+    bench_snapshot_diff_ordered_merge
 );
 criterion_main!(parsed_node_cache);

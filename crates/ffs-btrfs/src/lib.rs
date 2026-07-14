@@ -1717,38 +1717,58 @@ pub fn snapshot_diff_by_generation(
 
     let old_inodes = collect_inodes(older_entries);
     let new_inodes = collect_inodes(newer_entries);
+    let mut old_inodes = old_inodes.into_iter().peekable();
+    let mut new_inodes = new_inodes.into_iter().peekable();
     let mut diffs = Vec::new();
 
-    // Deleted: in old but not in new
-    for &oid in old_inodes.keys() {
-        if !new_inodes.contains_key(&oid) {
-            diffs.push(SnapshotDiffEntry {
-                inode: oid,
-                change_type: SnapshotChangeType::Deleted,
-            });
-        }
-    }
-
-    // Added or Modified
-    for (&oid, &new_gen) in &new_inodes {
-        match old_inodes.get(&oid) {
-            None => {
+    // Merge the two ordered maps so the result is already sorted by inode.
+    loop {
+        match (old_inodes.peek().copied(), new_inodes.peek().copied()) {
+            (None, None) => break,
+            (Some((oid, _)), None) => {
+                diffs.push(SnapshotDiffEntry {
+                    inode: oid,
+                    change_type: SnapshotChangeType::Deleted,
+                });
+                let _ = old_inodes.next();
+            }
+            (None, Some((oid, _))) => {
                 diffs.push(SnapshotDiffEntry {
                     inode: oid,
                     change_type: SnapshotChangeType::Added,
                 });
+                let _ = new_inodes.next();
             }
-            Some(&old_gen) if new_gen > old_gen => {
-                diffs.push(SnapshotDiffEntry {
-                    inode: oid,
-                    change_type: SnapshotChangeType::Modified,
-                });
+            (Some((old_oid, old_gen)), Some((new_oid, new_gen))) => {
+                match old_oid.cmp(&new_oid) {
+                    std::cmp::Ordering::Less => {
+                        diffs.push(SnapshotDiffEntry {
+                            inode: old_oid,
+                            change_type: SnapshotChangeType::Deleted,
+                        });
+                        let _ = old_inodes.next();
+                    }
+                    std::cmp::Ordering::Greater => {
+                        diffs.push(SnapshotDiffEntry {
+                            inode: new_oid,
+                            change_type: SnapshotChangeType::Added,
+                        });
+                        let _ = new_inodes.next();
+                    }
+                    std::cmp::Ordering::Equal => {
+                        if new_gen > old_gen {
+                            diffs.push(SnapshotDiffEntry {
+                                inode: old_oid,
+                                change_type: SnapshotChangeType::Modified,
+                            });
+                        }
+                        let _ = old_inodes.next();
+                        let _ = new_inodes.next();
+                    }
+                }
             }
-            _ => {}
         }
     }
-
-    diffs.sort_by_key(|d| d.inode);
     diffs
 }
 
