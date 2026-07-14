@@ -724,7 +724,7 @@ fn bench_split_materialize_tail_ab(c: &mut Criterion) {
 // candidate keeps that ordered top-k while retaining every key in the shadow
 // set; the controls freeze the previous unbounded delta-value map.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RangeReplayOp {
     Insert { key: BwKey, value: BwValue },
     Delete { key: BwKey },
@@ -1098,6 +1098,117 @@ fn bench_range_chain_walk_ab(c: &mut Criterion) {
     group.finish();
 }
 
+// ── Scenario 11: Materialization op-collection traversal A/A/B ───────
+//
+// Materialization first walks the immutable delta chain and records operations
+// before it clones the base map and replays them. These controls freeze the
+// former per-link Arc clone/drop; the candidate borrows each link. Base cloning
+// and replay are intentionally excluded so this row isolates the changed phase.
+
+fn collect_materialize_ops_cloned(head: &Arc<PageDelta>) -> (Vec<RangeReplayOp>, usize) {
+    let mut ops = Vec::new();
+    let mut cursor = Arc::clone(head);
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len += 1;
+        match cursor.as_ref() {
+            PageDelta::Base { .. } => return (ops, chain_len),
+            PageDelta::Insert { key, value, next } => {
+                ops.push(RangeReplayOp::Insert {
+                    key: *key,
+                    value: *value,
+                });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Delete { key, next } => {
+                ops.push(RangeReplayOp::Delete { key: *key });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Split {
+                separator, next, ..
+            } => {
+                ops.push(RangeReplayOp::Split {
+                    separator: *separator,
+                });
+                cursor = Arc::clone(next);
+            }
+            PageDelta::Merge { next, .. } => cursor = Arc::clone(next),
+            PageDelta::MessageBuffer { .. } | PageDelta::AppendRun { .. } => {
+                unreachable!("the direct-delta fixture contains no buffered nodes")
+            }
+        }
+    }
+}
+
+fn collect_materialize_ops_borrowed(head: &Arc<PageDelta>) -> (Vec<RangeReplayOp>, usize) {
+    let mut ops = Vec::new();
+    let mut cursor = head.as_ref();
+    let mut chain_len = 0_usize;
+
+    loop {
+        chain_len += 1;
+        match cursor {
+            PageDelta::Base { .. } => return (ops, chain_len),
+            PageDelta::Insert { key, value, next } => {
+                ops.push(RangeReplayOp::Insert {
+                    key: *key,
+                    value: *value,
+                });
+                cursor = next.as_ref();
+            }
+            PageDelta::Delete { key, next } => {
+                ops.push(RangeReplayOp::Delete { key: *key });
+                cursor = next.as_ref();
+            }
+            PageDelta::Split {
+                separator, next, ..
+            } => {
+                ops.push(RangeReplayOp::Split {
+                    separator: *separator,
+                });
+                cursor = next.as_ref();
+            }
+            PageDelta::Merge { next, .. } => cursor = next.as_ref(),
+            PageDelta::MessageBuffer { .. } | PageDelta::AppendRun { .. } => {
+                unreachable!("the direct-delta fixture contains no buffered nodes")
+            }
+        }
+    }
+}
+
+fn bench_materialize_chain_collect_ab(c: &mut Criterion) {
+    let head = range_chain_walk_fixture(256);
+    let control = collect_materialize_ops_cloned(&head);
+    let candidate = collect_materialize_ops_borrowed(&head);
+    assert_eq!(candidate, control);
+    assert_eq!(candidate.0.len(), 256);
+    assert_eq!(candidate.1, 257);
+
+    let mut group = c.benchmark_group("bwtree_materialize_collect_256_deltas");
+    group.sample_size(30);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(3));
+
+    for control in ["arc_clone_control_a", "arc_clone_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                std::hint::black_box(collect_materialize_ops_cloned(std::hint::black_box(&head)))
+            })
+        });
+    }
+
+    group.bench_function("borrowed_candidate", |b| {
+        b.iter(|| {
+            std::hint::black_box(collect_materialize_ops_borrowed(std::hint::black_box(
+                &head,
+            )))
+        })
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_read_heavy,
@@ -1111,5 +1222,6 @@ criterion_group!(
     bench_range_delta_top_k_ab,
     bench_range_shadow_insert_fusion_ab,
     bench_range_chain_walk_ab,
+    bench_materialize_chain_collect_ab,
 );
 criterion_main!(benches);
