@@ -346,7 +346,7 @@ impl std::fmt::Debug for CommitPublicationGate {
 /// A single shard of the version store.
 #[derive(Debug, Default)]
 struct MvccShard {
-    versions: FxHashMap<BlockNumber, Vec<BlockVersion>>,
+    versions: FxHashMap<BlockNumber, ShardVersionChain>,
     /// Per-shard SSI log.  Entries are kept here because SSI checks
     /// are per-block and shards are block-partitioned.
     ssi_log: Vec<CommittedTxnRecord>,
@@ -360,6 +360,7 @@ struct MvccShard {
     prune_candidates: FxHashSet<BlockNumber>,
 }
 
+type ShardVersionChain = SmallVec<[BlockVersion; 1]>;
 type ShardWriteGuard<'a> = RwLockWriteGuard<'a, MvccShard>;
 type ShardIndexVec = SmallVec<[usize; 4]>;
 type ShardGuardVec<'a> = SmallVec<[(usize, ShardWriteGuard<'a>); 4]>;
@@ -617,7 +618,7 @@ impl ShardedMvccStore {
     }
 
     fn build_version_data(
-        existing_versions: Option<&Vec<BlockVersion>>,
+        existing_versions: Option<&ShardVersionChain>,
         bytes: Vec<u8>,
         dedup_enabled: bool,
         block: BlockNumber,
@@ -1473,7 +1474,13 @@ impl ShardedMvccStore {
     pub fn version_count(&self) -> usize {
         self.shards
             .iter()
-            .map(|s| s.read().versions.values().map(Vec::len).sum::<usize>())
+            .map(|s| {
+                s.read()
+                    .versions
+                    .values()
+                    .map(|versions| versions.len())
+                    .sum::<usize>()
+            })
             .sum()
     }
 

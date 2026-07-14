@@ -16,13 +16,18 @@
 
 use asupersync::Cx;
 use criterion::{BenchmarkId, Criterion, criterion_group};
+use ffs_mvcc::compression::VersionData;
 use ffs_mvcc::persist::{PersistOptions, PersistentMvccStore};
-use ffs_mvcc::{CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, MvccStore};
+use ffs_mvcc::{
+    BlockVersion, CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, MvccStore,
+};
 use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use parking_lot::Mutex;
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 #[cfg(feature = "bench-instrumentation")]
 use sha2::{Digest, Sha256};
+use smallvec::SmallVec;
 use std::borrow::Cow;
 use std::collections::BTreeSet;
 #[cfg(feature = "bench-instrumentation")]
@@ -1977,6 +1982,81 @@ fn bench_gdt_disjoint_range_conflict(c: &mut Criterion) {
     group.finish();
 }
 
+const SINGLE_VERSION_CHAIN_BLOCKS: usize = 256;
+type InlineVersionChain = SmallVec<[BlockVersion; 1]>;
+
+fn single_version_chain_fixture() -> Vec<BlockVersion> {
+    (0..SINGLE_VERSION_CHAIN_BLOCKS)
+        .map(|index| {
+            let index = u64::try_from(index).expect("fixture index fits");
+            let block = BlockNumber(index);
+            let fill = u8::try_from(index % 251).expect("fixture byte fits");
+            BlockVersion {
+                block,
+                commit_seq: CommitSeq(index + 1),
+                writer: TxnId(index + 1),
+                data: VersionData::full(vec![fill; 4096]),
+            }
+        })
+        .collect()
+}
+
+fn build_vec_version_chains(
+    versions: Vec<BlockVersion>,
+) -> FxHashMap<BlockNumber, Vec<BlockVersion>> {
+    let mut chains: FxHashMap<BlockNumber, Vec<BlockVersion>> = FxHashMap::default();
+    for version in versions {
+        chains.entry(version.block).or_default().push(version);
+    }
+    chains
+}
+
+fn build_inline_version_chains(
+    versions: Vec<BlockVersion>,
+) -> FxHashMap<BlockNumber, InlineVersionChain> {
+    let mut chains: FxHashMap<BlockNumber, InlineVersionChain> = FxHashMap::default();
+    for version in versions {
+        chains.entry(version.block).or_default().push(version);
+    }
+    chains
+}
+
+fn bench_single_version_chain_storage_ab(c: &mut Criterion) {
+    let fixture = single_version_chain_fixture();
+    let vec_chains = build_vec_version_chains(fixture.clone());
+    let inline_chains = build_inline_version_chains(fixture.clone());
+    assert_eq!(vec_chains.len(), inline_chains.len());
+    for (block, versions) in &vec_chains {
+        assert_eq!(
+            versions.as_slice(),
+            inline_chains
+                .get(block)
+                .expect("inline chain contains every block")
+                .as_slice(),
+            "inline version-chain storage changed version order or bytes"
+        );
+    }
+
+    let mut group = c.benchmark_group("mvcc_single_version_chain_storage_256");
+    for control in ["vec_chain_a", "vec_chain_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || fixture.clone(),
+                |versions| black_box(build_vec_version_chains(versions)),
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("inline_smallvec_1", |b| {
+        b.iter_batched(
+            || fixture.clone(),
+            |versions| black_box(build_inline_version_chains(versions)),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 /// Measure sharded MVCC commit throughput on disjoint writer-owned block ranges.
 ///
 /// This is the high-core counterpart to `bench_mvcc_contention`: it keeps the
@@ -2543,6 +2623,7 @@ criterion_group!(
     bench_mvcc_contention,
     bench_merge_proof_success_rate,
     bench_gdt_disjoint_range_conflict,
+    bench_single_version_chain_storage_ab,
     bench_sharded_mvcc_contention,
     bench_sharded_latest_published_search_ab,
     bench_shard_index_routing_ab,
