@@ -153,6 +153,34 @@ fn bench(c: &mut Criterion) {
     });
 
     g.finish();
+
+    // Complete one-shot multi-file reads cannot reuse the single hot slot.
+    // Mirror the miss-path publication cost with duplicate controls, then the
+    // candidate's owned-local path. The payload keeps the Arc allocation
+    // representative without benchmarking inode parsing itself.
+    let mut g = c.benchmark_group("hot_inode_complete_read_admission_256");
+    for name in ["control_publish_a", "control_publish_b"] {
+        g.bench_function(name, |b| {
+            let slot: Arc<ArcSwapOption<(u64, Arc<[u8; 256]>)>> =
+                Arc::new(ArcSwapOption::empty());
+            b.iter(|| {
+                for key in 0..256u64 {
+                    let parsed = Arc::new(black_box([key as u8; 256]));
+                    slot.store(Some(Arc::new((key, Arc::clone(&parsed)))));
+                    black_box(parsed);
+                }
+            });
+        });
+    }
+    g.bench_function("candidate_keep_owned", |b| {
+        b.iter(|| {
+            for key in 0..256u64 {
+                let parsed = black_box([key as u8; 256]);
+                black_box(parsed);
+            }
+        });
+    });
+    g.finish();
 }
 
 criterion_group!(benches, bench);

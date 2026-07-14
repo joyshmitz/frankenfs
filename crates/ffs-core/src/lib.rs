@@ -32520,7 +32520,14 @@ impl OpenFs {
                     Some(arc) => arc.as_ref(),
                     None => {
                         let parsed = self.read_inode_with_scope(cx, scope, canonical)?;
-                        if read_only {
+                        // A complete one-shot read cannot reuse this inode on a
+                        // later chunk, so publishing it only displaces another
+                        // file from the single hot slot and pays two Arc
+                        // allocations plus ArcSwap debt. Partial reads retain
+                        // publication because subsequent chunks can hit it.
+                        let publish_hot = read_only
+                            && (offset != 0 || u64::from(size) < parsed.size);
+                        if publish_hot {
                             let arc = Arc::new(parsed);
                             self.ext4_hot_inode
                                 .store(Some(Arc::new((canonical.0, Arc::clone(&arc)))));
