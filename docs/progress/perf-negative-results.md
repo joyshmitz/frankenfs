@@ -13,6 +13,22 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## MVCC version-chain resolution + staged-write lookup: already binary-search/SmallVec - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed the MVCC read/commit hot path (ffs-mvcc, my lane); already
+optimal. No lever.
+
+- `newest_visible_index` / `resolve_version_bytes_cow_at_or_before` (per `read_visible`,
+  i.e. every read-your-writes + adapter read): `partition_point` BINARY search over the
+  version chain, then a Cow (no copy on the borrow path). Not a linear scan.
+- `staged_write_pos` (per staged-block lookup during a txn): `binary_search_by_key`;
+  the write set is `StagedWrites = SmallVec<[(BlockNumber, StagedWrite); 4]>` — inline
+  for the common small-txn case, no heap alloc.
+
+Consistent with the rest of the MVCC store, which this campaign already mined (merge
+validators b10fc652/5c802bae, preflight, contention-metrics gating 73174f5b, read GC
+un-pin 0576bb8b, Arc-share reads 5d4a8f8d). Nothing left here.
+
 ## inode-parse base-area bounds-check hoist: NEUTRAL, the `len < 128` guard already elides - 2026-07-14 (REJECT, benched)
 
 Status: REJECT — benched the array-ref hoist on the READ side of the inode parser
