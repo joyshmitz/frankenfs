@@ -2573,6 +2573,14 @@ impl MvccStore {
 
         let chain_cap = self.compression_policy.max_chain_length;
         let prev_effective = self.effective_policy();
+        // Only Adaptive consumes the contention metrics (`effective_policy` reads
+        // them to select a strategy; no production caller reads them otherwise).
+        // Under a fixed policy (default SafeMerge) the per-commit `record_commit` +
+        // `select_policy` (2-3x/commit under Adaptive) + policy-switch/sample
+        // emissions are dead CPU — skip them. Sibling of the sharded-store gate
+        // (73174f5b). Merge telemetry (`mvcc_merge_applied`) stays ungated since
+        // merges also occur under SafeMerge.
+        let record_metrics = matches!(self.conflict_policy, ConflictPolicy::Adaptive);
         let mut had_conflict = false;
         let mut merge_succeeded = false;
         let mut merged_block_count: usize = 0;
@@ -2598,15 +2606,18 @@ impl MvccStore {
                         merge_variants.insert(variant);
                     }
                     Err(err) => {
-                        self.contention_metrics.record_commit(
-                            self.adaptive_config.ema_alpha,
-                            true,
-                            false,
-                            true,
-                        );
-                        self.contention_metrics.last_selected =
-                            Some(self.contention_metrics.select_policy(&self.adaptive_config));
-                        self.maybe_emit_policy_switch(prev_effective);
+                        if record_metrics {
+                            self.contention_metrics.record_commit(
+                                self.adaptive_config.ema_alpha,
+                                true,
+                                false,
+                                true,
+                            );
+                            self.contention_metrics.last_selected = Some(
+                                self.contention_metrics.select_policy(&self.adaptive_config),
+                            );
+                            self.maybe_emit_policy_switch(prev_effective);
+                        }
                         return Err(err);
                     }
                 }
@@ -2614,29 +2625,33 @@ impl MvccStore {
             if let Some(cap) = chain_cap {
                 if let Err(err) = self.enforce_chain_pressure(txn.id, block, cap) {
                     // Chain backpressure abort — still record the commit attempt.
-                    self.contention_metrics.record_commit(
-                        self.adaptive_config.ema_alpha,
-                        had_conflict,
-                        merge_succeeded,
-                        true,
-                    );
-                    self.contention_metrics.last_selected =
-                        Some(self.contention_metrics.select_policy(&self.adaptive_config));
+                    if record_metrics {
+                        self.contention_metrics.record_commit(
+                            self.adaptive_config.ema_alpha,
+                            had_conflict,
+                            merge_succeeded,
+                            true,
+                        );
+                        self.contention_metrics.last_selected =
+                            Some(self.contention_metrics.select_policy(&self.adaptive_config));
+                    }
                     return Err(err);
                 }
             }
         }
 
         // Record successful preflight (no abort).
-        self.contention_metrics.record_commit(
-            self.adaptive_config.ema_alpha,
-            had_conflict,
-            merge_succeeded,
-            false,
-        );
-        // Update hysteresis state so the next select_policy call has a stable incumbent.
-        self.contention_metrics.last_selected =
-            Some(self.contention_metrics.select_policy(&self.adaptive_config));
+        if record_metrics {
+            self.contention_metrics.record_commit(
+                self.adaptive_config.ema_alpha,
+                had_conflict,
+                merge_succeeded,
+                false,
+            );
+            // Update hysteresis state so the next select_policy call has a stable incumbent.
+            self.contention_metrics.last_selected =
+                Some(self.contention_metrics.select_policy(&self.adaptive_config));
+        }
 
         // mvcc_merge_applied — emit after successful merge commit preflight.
         if merged_block_count > 0 {
@@ -2657,13 +2672,15 @@ impl MvccStore {
             );
         }
 
-        self.maybe_emit_policy_switch(prev_effective);
+        if record_metrics {
+            self.maybe_emit_policy_switch(prev_effective);
 
-        // Periodic contention sample (every 100 commits).
-        if self.contention_metrics.total_commits % 100 == 0
-            && self.contention_metrics.total_commits > 0
-        {
-            self.emit_contention_sample();
+            // Periodic contention sample (every 100 commits).
+            if self.contention_metrics.total_commits % 100 == 0
+                && self.contention_metrics.total_commits > 0
+            {
+                self.emit_contention_sample();
+            }
         }
 
         Ok(())
