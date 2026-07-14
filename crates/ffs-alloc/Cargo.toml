@@ -22,6 +22,10 @@ name = "bitmap_ops"
 harness = false
 
 [[bench]]
+name = "highest_set_bit_width"
+harness = false
+
+[[bench]]
 name = "batch_alloc"
 harness = false
 

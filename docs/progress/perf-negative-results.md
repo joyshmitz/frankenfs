@@ -13,6 +13,30 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `highest_set_bit_index` word-at-a-time reverse scan (inode-alloc itable_unused) - 2026-07-14 (KEEP)
+
+Status: KEEP — a real DEFAULT-path win on the create serial floor (the first
+non-sharded, non-post-cutover lever in several turns).
+
+`highest_set_bit_index` runs on EVERY inode alloc (in `persist_group_desc_*`, to
+recompute the group descriptor's `itable_unused = inodes_per_group - highest_used -
+1`). It reverse-scanned the group's inode bitmap BYTE-BY-BYTE for the top set bit.
+On a SPARSE group (few low inodes used — the common early-fill state, and the create
+serial floor) it walks all the high zero bytes to reach the top bit — O(nbytes),
+e.g. ~1024 iterations for inodes_per_group=8192. Rewrote it to skip a u64 (8 bytes)
+per step: the last byte stays scalar (the only byte that can hold a padding bit >=
+count), the fully-real lower bytes are skipped by `u64::from_le_bytes(..) != 0` +
+`63 - leading_zeros()`. Byte-IDENTICAL to the scalar reverse scan, proven exhaustively
+by a new proptest `proptest_highest_set_bit_index_matches_scalar` (512 random
+bitmap/count cases incl. the padding boundary and count>bits) + the existing
+`..._finds_top_used_bit_and_ignores_padding` edge-case test (ffs-alloc 218/218). A/B
+(benches/highest_set_bit_width, sparse worst case): **~3.5x** — 2048: 86.8->24.8 ns;
+8192: 284->80 ns; scaling ~3.5x at 65536; CIs cleanly separated. ~200 ns saved per
+inode alloc (inodes_per_group=8192) on the create serial floor, so it helps BOTH the
+single-lock create path AND the sharded 3.7x path (unlike the default-off sharded
+micro-levers). Not the full 8x (the compiler partly handles the byte loop) but a
+clean, e2fsck-safe (pure-function, proptest-pinned) reduction.
+
 ## ext4 metadata checksum path is already optimal (crc32c hardware-accelerated; simd warm is diagnostic-only) - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — the ext4 metadata-checksum hot path (every inode / group-desc /

@@ -254,22 +254,50 @@ fn bitmap_set_with_clear_undo(bitmap: &mut [u8], idx: u32, undo_clear: &mut Vec<
 
 /// Highest set bit index strictly below `count`, or `None` if no bit is set.
 /// Matches [`bitmap_set`]'s LSB-first-within-byte convention.
+#[expect(clippy::cast_possible_truncation)]
 fn highest_set_bit_index(bitmap: &[u8], count: u32) -> Option<u32> {
     let count = count as usize;
     let nbytes = count.div_ceil(8).min(bitmap.len());
-    for byte_idx in (0..nbytes).rev() {
-        let byte = bitmap[byte_idx];
-        if byte == 0 {
-            continue;
-        }
+    if nbytes == 0 {
+        return None;
+    }
+    let last = nbytes - 1;
+
+    // The ONLY byte that can hold a set bit at or beyond `count` (padding) is the
+    // last one, when `count` is not a multiple of 8: `nbytes = ceil(count/8)`, so
+    // every byte in `[0, last)` covers indices `< (nbytes-1)*8 <= count-1 < count`.
+    // Scan the last byte scalar (high-to-low, honoring the `idx < count` bound),
+    // then skip the fully-real lower bytes a WORD (8 bytes) at a time instead of
+    // byte-by-byte — the top set bit of a non-zero little-endian window is at
+    // `(end-8)*8 + (63 - leading_zeros)`. Byte-identical to the scalar reverse
+    // scan (`highest_set_bit_index_matches_scalar_reference` proptest), just an
+    // 8×-narrower zero-skip on a sparse group's inode bitmap, which runs under the
+    // alloc lock on the create serial floor.
+    let byte = bitmap[last];
+    if byte != 0 {
         for bit in (0..8u32).rev() {
             if byte & (1 << bit) != 0 {
-                let idx = byte_idx * 8 + bit as usize;
+                let idx = last * 8 + bit as usize;
                 if idx < count {
-                    #[expect(clippy::cast_possible_truncation)]
                     return Some(idx as u32);
                 }
             }
+        }
+    }
+
+    // Lower bytes `[0, last)` are all real (no padding, all indices < count).
+    let mut end = last;
+    while end >= 8 {
+        let word = u64::from_le_bytes(bitmap[end - 8..end].try_into().unwrap());
+        if word != 0 {
+            return Some(((end - 8) * 8) as u32 + (63 - word.leading_zeros()));
+        }
+        end -= 8;
+    }
+    for byte_idx in (0..end).rev() {
+        let byte = bitmap[byte_idx];
+        if byte != 0 {
+            return Some((byte_idx * 8) as u32 + (7 - byte.leading_zeros()));
         }
     }
     None
@@ -4318,6 +4346,45 @@ mod tests {
             let got = bitmap_find_contiguous_linear(&bytes, count, n, start);
             let want = find_contiguous_linear_naive(&bytes, count, n, start);
             proptest::prop_assert_eq!(got, want, "n={} start={}", n, start);
+        }
+
+        /// The word-at-a-time `highest_set_bit_index` must match the scalar
+        /// byte-by-byte reference for ANY bitmap + count, including the padding
+        /// boundary (count not a multiple of 8) and count > bits — the invariant
+        /// that keeps `itable_unused` (hence e2fsck) correct on the inode-alloc
+        /// path. Exhaustive byte-identity proof for the SWAR rewrite.
+        #[test]
+        fn proptest_highest_set_bit_index_matches_scalar(
+            bytes in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..40),
+            count in 0u32..400,
+        ) {
+            #[allow(clippy::cast_possible_truncation)]
+            fn scalar_ref(bitmap: &[u8], count: u32) -> Option<u32> {
+                let count = count as usize;
+                let nbytes = count.div_ceil(8).min(bitmap.len());
+                for byte_idx in (0..nbytes).rev() {
+                    let byte = bitmap[byte_idx];
+                    if byte == 0 {
+                        continue;
+                    }
+                    for bit in (0..8u32).rev() {
+                        if byte & (1 << bit) != 0 {
+                            let idx = byte_idx * 8 + bit as usize;
+                            if idx < count {
+                                return Some(idx as u32);
+                            }
+                        }
+                    }
+                }
+                None
+            }
+            proptest::prop_assert_eq!(
+                highest_set_bit_index(&bytes, count),
+                scalar_ref(&bytes, count),
+                "bytes={:?} count={}",
+                bytes,
+                count
+            );
         }
 
         /// `group_block_to_absolute` and `absolute_to_group_block` are exact
