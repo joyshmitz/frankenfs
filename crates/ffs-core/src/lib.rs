@@ -18103,8 +18103,63 @@ impl OpenFs {
             now_secs,
             now_nsec,
         );
-        ffs_inode::write_inode_at(cx, dev, loc, inode_size, ino, &inode, csum_seed)?;
+        self.ext4_sharded_stage_inode_slot(cx, dev, loc, inode_size, ino, &inode, csum_seed)?;
         Ok((ino, inode))
+    }
+
+    /// Stage `inode` into its inode-table slot under a SLOT-SCOPED merge proof
+    /// (bd-bhh0i slice 2b) — the merge-aware sibling of `ffs_inode::write_inode_at`
+    /// for the sharded (no-write-lock) path. It reproduces `write_inode_at`
+    /// (serialize the inode's slot bytes, read the table block with read-your-
+    /// writes, patch just this inode's `[byte_offset, byte_offset + inode_size)`
+    /// slot, write the whole block) EXCEPT the write auto-commits under
+    /// `MergeProof::timestamp_only_inode_range` instead of the default `Unsafe`
+    /// proof the generic `dev.write_block` stages. So two concurrent sharded
+    /// creates writing DISJOINT inode slots of the same 4 KiB table block MERGE
+    /// instead of first-committer-wins conflicting — the parallel-create
+    /// bottleneck the cutover hit ("first-committer-wins conflict on block 657").
+    /// Byte-identical single-threaded: the patched block is the same bytes
+    /// `write_inode_at` would land, committed to the same store; the proof is
+    /// consulted ONLY on a commit conflict, which cannot occur without a
+    /// concurrent writer.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[allow(clippy::too_many_arguments)]
+    fn ext4_sharded_stage_inode_slot(
+        &self,
+        cx: &Cx,
+        dev: &dyn ffs_block::BlockDevice,
+        loc: ffs_inode::InodeLocation,
+        inode_size: usize,
+        ino: InodeNumber,
+        inode: &Ext4Inode,
+        csum_seed: u32,
+    ) -> Result<(), FfsError> {
+        // Serialize the inode's slot bytes (the exact bytes write_inode_at lands),
+        // preferring a stack buffer for the standard 128/256-byte inode_size.
+        let mut stack = [0u8; 256];
+        let mut heap: Vec<u8>;
+        let slot: &mut [u8] = if inode_size <= stack.len() {
+            &mut stack[..inode_size]
+        } else {
+            heap = vec![0u8; inode_size];
+            &mut heap
+        };
+        ffs_inode::serialize_inode_with_checksum(inode, inode_size, ino, csum_seed, slot);
+
+        // Read-modify-write the inode-table block (read-your-writes via the
+        // sharded adapter's live snapshot), patch only this inode's slot, then
+        // auto-commit the whole block under a slot-scoped merge proof.
+        let mut block_data = dev.read_block(cx, loc.block)?.as_slice().to_vec();
+        if loc.byte_offset + inode_size > block_data.len() {
+            return Err(FfsError::Corruption {
+                block: loc.block.0,
+                detail: "inode extends beyond block boundary".into(),
+            });
+        }
+        block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(slot);
+        let proof = MergeProof::timestamp_only_inode_range(loc.byte_offset, inode_size);
+        self.mvcc_store
+            .autocommit_block_with_proof(loc.block, block_data, proof)
     }
 
     /// Write an inode via the sharded (no-write-lock) path (bd-bhh0i cutover
@@ -18133,7 +18188,7 @@ impl OpenFs {
                 block: 0,
                 detail: format!("sharded write: inode {} out of range", ino.0),
             })?;
-        ffs_inode::write_inode_at(cx, dev, loc, inode_size, ino, inode, csum_seed)
+        self.ext4_sharded_stage_inode_slot(cx, dev, loc, inode_size, ino, inode, csum_seed)
     }
 
     /// Allocate one new directory block via the sharded (no-write-lock) path
@@ -63333,6 +63388,72 @@ mod tests {
             .total_free()
             .blocks;
         assert_eq!(total_before, total_after, "an inode write must not allocate");
+    }
+
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    #[test]
+    fn ext4_sharded_inode_writes_to_disjoint_slots_merge_bd_bhh0i() {
+        // bd-bhh0i slice 2b: the sharded inode write stages the inode-table block
+        // under a slot-scoped `timestamp_only_inode_range` proof, so two
+        // concurrent creates writing DISJOINT inode slots of the same table block
+        // MERGE instead of first-committer-wins conflicting (the cutover's
+        // "first-committer-wins conflict on block 657"). This drives the MVCC
+        // store exactly as `ext4_sharded_stage_inode_slot` does: an overlapping
+        // pair of stale-snapshot commits patching disjoint slots of one block.
+        // Under the slot-scoped proof both MUST commit; under the default `Unsafe`
+        // proof (the pre-slice-2b behavior) the second MUST conflict.
+        let Some((fs, _tmp)) = open_writable_ext4_mkfs(16) else {
+            return;
+        };
+        let geo = FsGeometry::from_superblock(fs.ext4_superblock().expect("ext4 superblock"));
+        let block_size = geo.block_size as usize;
+        let inode_size = usize::from(geo.inode_size);
+        assert!(
+            inode_size > 0 && inode_size * 2 <= block_size,
+            "need two disjoint inode slots in one block"
+        );
+        let (off_a, off_b) = (0usize, inode_size);
+
+        // Run A||B on `block`, both patching disjoint slots; B stages `b_proof`.
+        // Returns whether B commits (true = merged, false = conflicted).
+        let run = |block: BlockNumber, b_proof: MergeProof| -> bool {
+            // Establish a base version so base/latest/staged lengths all match at
+            // the merge check (the store reads base/latest from its version map).
+            let base = vec![0xABu8; block_size];
+            let mut v0 = fs.mvcc_store.begin();
+            v0.stage_write(block, base.clone());
+            fs.mvcc_store.commit(v0).expect("base version commits");
+
+            // A and B both begin at the post-base snapshot (overlap: neither sees
+            // the other's commit) — the first-committer-wins race.
+            let mut a = fs.mvcc_store.begin();
+            let mut b = fs.mvcc_store.begin();
+            let mut block_a = base.clone();
+            block_a[off_a..off_a + inode_size].fill(0x11);
+            a.stage_write_with_proof(
+                block,
+                block_a,
+                MergeProof::timestamp_only_inode_range(off_a, inode_size),
+            );
+            let mut block_b = base.clone();
+            block_b[off_b..off_b + inode_size].fill(0x22);
+            b.stage_write_with_proof(block, block_b, b_proof);
+
+            fs.mvcc_store.commit(a).expect("first writer commits");
+            fs.mvcc_store.commit(b).is_ok()
+        };
+
+        assert!(
+            run(
+                BlockNumber(900_001),
+                MergeProof::timestamp_only_inode_range(off_b, inode_size)
+            ),
+            "disjoint-slot writes under a slot-scoped proof must MERGE, not conflict"
+        );
+        assert!(
+            !run(BlockNumber(900_002), MergeProof::Unsafe),
+            "disjoint-slot writes under the default Unsafe proof must FCW-conflict"
+        );
     }
 
     #[cfg(feature = "bhh0i_sharded_alloc")]

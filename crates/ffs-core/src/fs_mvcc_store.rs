@@ -148,6 +148,32 @@ impl FsMvccStore {
             .then(|| self.prune_safe())
     }
 
+    /// Auto-commit a single full-block write staged under a specific merge
+    /// `proof` — the proof-carrying sibling of [`FsMvccBlockDevice::write_block`],
+    /// which stages the default `Unsafe` proof. The sharded (no-write-lock) inode
+    /// write path (bd-bhh0i slice 2b) uses this to stage the patched inode-table
+    /// block under a SLOT-SCOPED `timestamp_only_inode_range` proof, so two
+    /// concurrent creates writing DISJOINT inode slots of the same 4 KiB table
+    /// block MERGE instead of first-committer-wins conflicting — the parallel-
+    /// create bottleneck the cutover panicked on ("first-committer-wins conflict
+    /// on block 657", a shared inode-table/GDT block). Identical begin/commit/
+    /// prune sequence to `write_block`; only the staged proof differs.
+    #[cfg(feature = "bhh0i_sharded_alloc")]
+    pub(super) fn autocommit_block_with_proof(
+        &self,
+        block: BlockNumber,
+        data: Vec<u8>,
+        proof: ffs_mvcc::MergeProof,
+    ) -> FfsResult<()> {
+        let mut txn = self.begin();
+        txn.stage_write_with_proof(block, data, proof);
+        let commit_seq = self
+            .commit(txn)
+            .map_err(|error| FfsError::Format(error.to_string()))?;
+        self.prune_after_commit_if_due(commit_seq);
+        Ok(())
+    }
+
     pub(super) fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
         match self {
             Self::Single(lock) => lock.read().flush_to_device(cx, device),
