@@ -610,13 +610,13 @@ impl MappingTable {
     /// length exceeds `threshold`.
     pub fn scan_for_consolidation(&self, threshold: usize) -> Vec<PageId> {
         let allocated = self.next_page_id.load(Ordering::Acquire);
+        let allocated_len = usize::try_from(allocated)
+            .unwrap_or(self.pages.len())
+            .min(self.pages.len());
         let mut candidates = Vec::new();
-        for raw_id in 0..allocated {
-            let page_id = PageId(raw_id);
-            if let Ok(snapshot) = self.get_page(page_id) {
-                if snapshot.chain_len > threshold {
-                    candidates.push(page_id);
-                }
+        for (raw_id, entry) in (0..allocated).zip(&self.pages[..allocated_len]) {
+            if read_lock(&entry.head).chain_len > threshold {
+                candidates.push(PageId(raw_id));
             }
         }
         candidates

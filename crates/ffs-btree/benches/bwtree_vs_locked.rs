@@ -19,6 +19,7 @@ use std::time::Duration;
 const PAGE_CAPACITY: usize = 16;
 const PREPOPULATE: u64 = 10_000;
 const OPS_PER_THREAD: u64 = 5_000;
+const CONSOLIDATION_SCAN_PAGES: usize = 8_192;
 
 // ── Locked BTreeMap baseline ────────────────────────────────────────────
 
@@ -303,6 +304,72 @@ fn bench_consolidation_overhead(c: &mut Criterion) {
             },
         );
     }
+    group.finish();
+}
+
+fn scan_for_consolidation_snapshot_control(
+    table: &MappingTable,
+    allocated: u64,
+    threshold: usize,
+) -> Vec<PageId> {
+    let mut candidates = Vec::new();
+    for raw_id in 0..allocated {
+        let page_id = PageId(raw_id);
+        if let Ok(snapshot) = table.get_page(page_id) {
+            if snapshot.chain_len > threshold {
+                candidates.push(page_id);
+            }
+        }
+    }
+    candidates
+}
+
+fn bench_consolidation_scan_ab(c: &mut Criterion) {
+    let table = MappingTable::with_capacity(CONSOLIDATION_SCAN_PAGES);
+    for page_index in 0..CONSOLIDATION_SCAN_PAGES {
+        let page = table.allocate_page().expect("allocate scan fixture page");
+        if page_index % 16 == 0 {
+            table
+                .insert(page, BwKey(page.0), BwValue(page.0))
+                .expect("extend scan fixture chain");
+        }
+    }
+
+    let allocated = u64::try_from(CONSOLIDATION_SCAN_PAGES).expect("page count fits u64");
+    let control = scan_for_consolidation_snapshot_control(&table, allocated, 1);
+    let candidate = table.scan_for_consolidation(1);
+    assert_eq!(candidate, control);
+    assert_eq!(candidate.len(), CONSOLIDATION_SCAN_PAGES / 16);
+    assert_eq!(
+        table.scan_for_consolidation(0),
+        scan_for_consolidation_snapshot_control(&table, allocated, 0)
+    );
+
+    let mut group = c.benchmark_group("bwtree_consolidation_scan_8192_pages");
+    group.sample_size(20);
+    group.warm_up_time(Duration::from_secs(1));
+    group.measurement_time(Duration::from_secs(2));
+
+    for control in ["snapshot_control_a", "snapshot_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                std::hint::black_box(scan_for_consolidation_snapshot_control(
+                    std::hint::black_box(&table),
+                    allocated,
+                    1,
+                ))
+            })
+        });
+    }
+
+    group.bench_function("direct_head_candidate", |b| {
+        b.iter(|| {
+            std::hint::black_box(
+                std::hint::black_box(&table).scan_for_consolidation(std::hint::black_box(1)),
+            )
+        })
+    });
+
     group.finish();
 }
 
@@ -1217,6 +1284,7 @@ criterion_group!(
     bench_mixed_auto_consolidation_ab,
     bench_write_heavy_message_buffer_ab,
     bench_consolidation_overhead,
+    bench_consolidation_scan_ab,
     bench_point_lookup_ab,
     bench_split_materialize_tail_ab,
     bench_range_delta_top_k_ab,
