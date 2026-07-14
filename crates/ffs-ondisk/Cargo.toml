@@ -22,6 +22,10 @@ name = "casefold_key"
 harness = false
 
 [[bench]]
+name = "inode_base_read_hoist"
+harness = false
+
+[[bench]]
 name = "btrfs_leaf_parse"
 harness = false
 

@@ -13,6 +13,29 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## inode-parse base-area bounds-check hoist: NEUTRAL, the `len < 128` guard already elides - 2026-07-14 (REJECT, benched)
+
+Status: REJECT — benched the array-ref hoist on the READ side of the inode parser
+(the hottest metadata op); it is a no-op. The write-side hoist won for a reason that
+does NOT apply to the read side.
+
+`Ext4Inode::parse_from_bytes_with_ibody` reads ~20 base-area fields (offsets < 128)
+via `ffs_types::read_le_u16/u32(bytes, off)?`, each a `.get()` bounds check. The
+write side (`serialize_inode_into`, b83531ef) hoisted the base to a `&mut [u8; 128]`
+array-ref and WON — but its only length fact was a `debug_assert_eq!(buf.len(),
+inode_size)`, which LLVM ignores, so its per-field checks were NOT elided. The read
+side is different: `parse_from_bytes_with_ibody` opens with `if bytes.len() < 128 {
+return Err }`, which establishes `len >= 128` for LLVM's range analysis; with
+`read_le_*` `#[inline]` + const call-site offsets, `bytes.get(off..off+n)` for
+`off+n <= 128 <= len` is provably in-bounds and LLVM already elides it.
+
+Bench (benches/inode_base_read_hoist, same binary, 15 base fields): production-style
+`read_le_per_field` **3.66 ns** vs literal-offset `arrayref_const_offset` **3.48 ns**
+— CIs overlap (3.36–4.01 vs 3.22–3.76), ~0.23 ns/field = just the loads+adds, no
+bounds-check overhead in either. NEUTRAL → the hoist is redundant; kept the bench as a
+regression guard (if the `len < 128` guard is ever removed, the checks come back).
+Retry predicate: none — the guard already gives the elision the write side had to hoist for.
+
 ## ffs-dir htree-index sweep: binary-search where used, the rest is test-only/inherent - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed ffs-dir (a fresh crate); no production lever.
