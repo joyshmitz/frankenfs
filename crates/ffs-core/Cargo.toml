@@ -58,6 +58,10 @@ name = "hot_inode_lockfree"
 harness = false
 
 [[bench]]
+name = "write_full_block_build"
+harness = false
+
+[[bench]]
 name = "extent_resolve"
 harness = false
 

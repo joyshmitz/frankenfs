@@ -13,6 +13,24 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## ext4_write full-block build: skip the memset on a full-block overwrite - 2026-07-14 (KEEP)
+
+Status: KEEP — a real DEFAULT write-path win (not sharded/default-off).
+
+The write loop builds each block to stage into the MVCC txn. For an ALIGNED FULL-block
+overwrite (`block_offset == 0 && chunk_len == bs`) it used `vec![0u8; bs]` (a full-block
+memset) then `copy_from_slice(data)` (memcpy) — but the zero-init is ENTIRELY overwritten
+by the copy, so it is pure waste. Took `data[data_start..].to_vec()` directly (one memcpy)
+for that case; partial writes still zero-fill a freshly-allocated block (bytes outside the
+chunk must read as zero) or RMW-read an existing one, then patch. Byte-IDENTICAL: the
+full-block staged bytes are the same `data`-filled block either way (write/roundtrip/
+fallocate suite 384/0). A/B (benches/write_full_block_build, 4 KiB): memset_then_copy
+**123.8 ns** → direct_to_vec **58.6 ns** = **~2.1x**, ~65 ns/block eliminated (the memset).
+Hits every full-block write — the dominant shape of large sequential writes — on the
+buffered write CPU path (the block is staged, not device-written, so this is real per-op
+CPU, not I/O-masked). LESSON: `vec![0; n]` + `copy_from_slice(whole)` is a memset the copy
+throws away — take the source directly.
+
 ## ext4_setattr (chmod/chown/utimes): read-once / write-once lean - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed a less-benched metadata-mutation op; already lean. No lever.

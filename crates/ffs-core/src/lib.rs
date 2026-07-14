@@ -22600,17 +22600,28 @@ impl OpenFs {
                 }
             };
 
-            // Read-modify-write the block.
-            let mut block_data =
-                if zero_fill_before_write || (block_offset == 0 && chunk_len == bs_usize) {
+            let data_start = usize::try_from(pos - offset)
+                .map_err(|_| FfsError::Format("write offset does not fit usize".into()))?;
+            // Build the block to stage. A FULL-block overwrite (offset 0, whole
+            // block) IS `data[data_start..]`, so take it directly — ONE memcpy —
+            // instead of `vec![0; bs]` (a full-block memset) + copy_from_slice
+            // (memcpy) whose zero-init is then entirely overwritten. Partial writes
+            // still zero-fill a freshly-allocated block (bytes outside the chunk are
+            // new → must read as zero) or read-modify-write an existing one, then
+            // patch the chunk. Byte-identical: the full-block result is the same
+            // `data`-filled block either way.
+            let block_data = if block_offset == 0 && chunk_len == bs_usize {
+                data[data_start..data_start + chunk_len].to_vec()
+            } else {
+                let mut buf = if zero_fill_before_write {
                     vec![0u8; bs_usize]
                 } else {
                     self.read_block_with_scope(cx, scope, phys_block)?
                 };
-            let data_start = usize::try_from(pos - offset)
-                .map_err(|_| FfsError::Format("write offset does not fit usize".into()))?;
-            block_data[block_offset..block_offset + chunk_len]
-                .copy_from_slice(&data[data_start..data_start + chunk_len]);
+                buf[block_offset..block_offset + chunk_len]
+                    .copy_from_slice(&data[data_start..data_start + chunk_len]);
+                buf
+            };
 
             if let Some(tx) = &mut scope.tx {
                 // Provide byte-range proof for adaptive merge policy.
