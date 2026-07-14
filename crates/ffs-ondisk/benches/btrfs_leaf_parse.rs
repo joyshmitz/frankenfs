@@ -9,13 +9,15 @@
 //! builds a packed leaf to establish the parse latency under load.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_ondisk::parse_leaf_items;
+use ffs_ondisk::{parse_internal_items, parse_leaf_items};
 use std::hint::black_box;
 
 /// btrfs on-disk header size (`sizeof(struct btrfs_header)`).
 const BTRFS_HEADER_SIZE: usize = 101;
 /// btrfs on-disk item-table entry size (`sizeof(struct btrfs_item)`).
 const BTRFS_ITEM_SIZE: usize = 25;
+/// btrfs on-disk internal key-pointer size (`sizeof(struct btrfs_key_ptr)`).
+const BTRFS_KEY_PTR_SIZE: usize = 33;
 /// `nritems` little-endian field offset inside the header.
 const NRITEMS_OFFSET: usize = 0x60;
 /// `level` byte offset inside the header.
@@ -46,6 +48,25 @@ fn build_dense_leaf(block_size: usize, payload_size: usize) -> Vec<u8> {
         block[base + 17..base + 21].copy_from_slice(&data_offset_rel.to_le_bytes());
         block[base + 21..base + 25]
             .copy_from_slice(&u32::try_from(payload_size).unwrap().to_le_bytes());
+    }
+    block
+}
+
+fn build_dense_internal_node(block_size: usize) -> Vec<u8> {
+    let nritems = (block_size - BTRFS_HEADER_SIZE) / BTRFS_KEY_PTR_SIZE;
+    let mut block = vec![0_u8; block_size];
+    block[NRITEMS_OFFSET..NRITEMS_OFFSET + 4]
+        .copy_from_slice(&u32::try_from(nritems).unwrap().to_le_bytes());
+    block[LEVEL_OFFSET] = 1;
+
+    for idx in 0..nritems {
+        let base = BTRFS_HEADER_SIZE + idx * BTRFS_KEY_PTR_SIZE;
+        let ordinal = u64::try_from(idx + 1).expect("fixture index fits");
+        block[base..base + 8].copy_from_slice(&ordinal.to_le_bytes());
+        block[base + 8] = 1;
+        block[base + 9..base + 17].copy_from_slice(&0_u64.to_le_bytes());
+        block[base + 17..base + 25].copy_from_slice(&ordinal.to_le_bytes());
+        block[base + 25..base + 33].copy_from_slice(&(ordinal + 7).to_le_bytes());
     }
     block
 }
@@ -204,6 +225,34 @@ fn chunked_item_table_digest(block: &[u8]) -> u64 {
     digest
 }
 
+fn indexed_key_ptr_table_digest(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let mut digest = 0_u64;
+    for idx in 0..nritems {
+        let base = BTRFS_HEADER_SIZE + idx * BTRFS_KEY_PTR_SIZE;
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base);
+        digest = digest.rotate_left(7) ^ u64::from(block[base + 8]);
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base + 9);
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base + 17);
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base + 25);
+    }
+    digest
+}
+
+fn chunked_key_ptr_table_digest(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let table_end = BTRFS_HEADER_SIZE + nritems * BTRFS_KEY_PTR_SIZE;
+    let mut digest = 0_u64;
+    for key_ptr in block[BTRFS_HEADER_SIZE..table_end].chunks_exact(BTRFS_KEY_PTR_SIZE) {
+        digest = digest.rotate_left(7) ^ read_u64_at(key_ptr, 0);
+        digest = digest.rotate_left(7) ^ u64::from(key_ptr[8]);
+        digest = digest.rotate_left(7) ^ read_u64_at(key_ptr, 9);
+        digest = digest.rotate_left(7) ^ read_u64_at(key_ptr, 17);
+        digest = digest.rotate_left(7) ^ read_u64_at(key_ptr, 25);
+    }
+    digest
+}
+
 fn bench_parse_dense_leaf(c: &mut Criterion) {
     // Default btrfs nodesize (16 KiB), 1-byte payloads → ~626 items.
     let leaf_16k = build_dense_leaf(16 * 1024, 1);
@@ -259,10 +308,44 @@ fn bench_item_table_decode_ab(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_internal_item_decode_ab(c: &mut Criterion) {
+    let node_16k = build_dense_internal_node(16 * 1024);
+    let (_, parsed) = parse_internal_items(&node_16k).expect("production internal parser");
+    assert_eq!(
+        parsed.len(),
+        (16 * 1024 - BTRFS_HEADER_SIZE) / BTRFS_KEY_PTR_SIZE
+    );
+    for (idx, key_ptr) in parsed.iter().enumerate() {
+        let ordinal = u64::try_from(idx + 1).expect("fixture index fits");
+        assert_eq!(key_ptr.key.objectid, ordinal);
+        assert_eq!(key_ptr.key.item_type, 1);
+        assert_eq!(key_ptr.key.offset, 0);
+        assert_eq!(key_ptr.blockptr, ordinal);
+        assert_eq!(key_ptr.generation, ordinal + 7);
+    }
+    assert_eq!(
+        indexed_key_ptr_table_digest(&node_16k),
+        chunked_key_ptr_table_digest(&node_16k),
+        "fixed-width key-pointer iteration changed decoded fields"
+    );
+
+    let mut group = c.benchmark_group("btrfs_internal_item_decode_ab");
+    for control in ["indexed_offsets_a", "indexed_offsets_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| black_box(indexed_key_ptr_table_digest(black_box(&node_16k))));
+        });
+    }
+    group.bench_function("fixed_width_chunks", |b| {
+        b.iter(|| black_box(chunked_key_ptr_table_digest(black_box(&node_16k))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     btrfs_leaf,
     bench_parse_dense_leaf,
     bench_payload_coverage_ab,
-    bench_item_table_decode_ab
+    bench_item_table_decode_ab,
+    bench_internal_item_decode_ab
 );
 criterion_main!(btrfs_leaf);

@@ -1674,18 +1674,18 @@ pub fn parse_internal_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsKeyPt
 
     let mut ptrs = Vec::with_capacity(nritems);
     let mut previous_key = None;
-    for idx in 0..nritems {
-        let base = BTRFS_HEADER_SIZE + idx * BTRFS_KEY_PTR_SIZE;
+    let key_ptr_table = &block[BTRFS_HEADER_SIZE..table_end];
+    for key_ptr in key_ptr_table.chunks_exact(BTRFS_KEY_PTR_SIZE) {
         let key = parse_ordered_key(
-            block,
-            base,
+            key_ptr,
+            0,
             &mut previous_key,
             "key_ptrs.key",
             "internal item keys not strictly increasing",
         )?;
 
-        let blockptr = read_le_u64(block, base + 17)?;
-        let generation = read_le_u64(block, base + 25)?;
+        let blockptr = read_le_u64(key_ptr, 17)?;
+        let generation = read_le_u64(key_ptr, 25)?;
 
         if blockptr == 0 {
             return Err(ParseError::InvalidField {
