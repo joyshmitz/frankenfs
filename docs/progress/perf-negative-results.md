@@ -13,6 +13,30 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## ffs-extent read-resolve + ext4 block-resolve sweep: all optimized - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed the file-read logical→physical resolve path (a different crate
+from last turn's ffs-alloc sweep); every hot function is already optimized. No lever.
+
+Probed (already optimized, do NOT re-attempt):
+- `ext4_resolve_block_from_mappings` (per-block read resolve): `partition_point` binary
+  search over the sorted mappings — O(log E), not linear.
+- `ext4_resolve_block_from_mappings_hinted` (bd-vpypn): caches the last mapping index so
+  sequential reads are O(1) (one bounds check), falling back to the binary search —
+  benched 2.0–2.5x, byte-identical.
+- `ffs_extent::map_logical_to_physical` / `map_logical_range_by_walk`: one `ExtentMapping`
+  pushed per real extent; `append_hole_mappings` emits ONE mapping per `u32::MAX` chunk
+  (≈1 per hole), not per block — already O(#extents), not O(#blocks).
+
+Considered + rejected (cold): `map_single_logical_to_physical` returns `vec![one_mapping]`
+(a 1-element heap Vec) for the count==1 case. It is NOT on the hot read path — reads
+resolve through the CACHED mappings via `ext4_resolve_block_from_mappings(_hinted)`, not a
+per-block `map_logical_to_physical` call; `map_single` fires only for uncommon count==1
+calls in the write/fallocate range paths (ffs-core:21671+). Cold + the public
+`-> Vec<ExtentMapping>` return type would need a SmallVec API change to avoid the alloc.
+Not worth it. Retry predicate: only if a profile shows count==1 `map_logical_to_physical`
+on a hot path.
+
 ## Alloc-path fresh-function sweep: all optimized (only highest_set_bit was a gap) - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — after the `highest_set_bit_index` win, swept the neighbouring
