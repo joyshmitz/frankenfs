@@ -13,6 +13,44 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Extent-meta double-walk REJECTED (already fast-pathed) + sharded `from_superblock` vein closed - 2026-07-14 (REJECT / BOUND, no code)
+
+Status: REJECT (the extent-meta double-walk candidate from the previous entry is not
+worth landing) + BOUND (the remaining sharded `from_superblock` sites are justified or
+churn) — the remote-only in-lane micro-lever surface is exhausted.
+
+**REJECT — skip the post-write extent-tree meta walk (the previous entry's candidate).**
+Verdict after reading `ext4_count_extent_tree_meta_blocks` (lib.rs:12897): it ALREADY
+has a depth-0 fast path — an inline extent tree (the COMMON case: extents fit in the
+inode) reads `root_bytes[6..8]` (eh_depth) and returns 0 with NO parse or walk. So both
+`meta_before` and `meta_after` are O(1) for the common case; the double-walk only costs
+for depth>0 EXTERNAL trees (large/fragmented files, a minority). Skipping the "after"
+walk there would save a recursion over cached nodes — small absolute win, ONLY for the
+minority — while carrying the i_blocks-miscount risk (the unwritten->written split from
+the prior entry) whose validation needs local e2fsck. Low value (common case already
+O(1)) + high risk + local-only validation = not worth it. Retry predicate UNCHANGED but
+downgraded: only if a profile shows depth>0 in-place-overwrite meta-walks are a real
+cost AND the ffs_btree node-delta signal + local e2fsck are both available.
+
+**BOUND — `ext4_persist_ctx_lockfree`'s `from_superblock` is not a clean lever.** Each
+sharded alloc/free helper computes `FsGeometry::from_superblock(sb)` AND calls
+`persist_ctx_lockfree`, which recomputes it — a real double-compute. But
+`persist_ctx_lockfree` needs geo only for `block_bitmap_units_per_group`, which reads
+the DERIVED `geo.cluster_ratio` (BIGALLOC: `cluster_size/block_size`); the cached
+`Ext4Geometry` lacks `cluster_ratio`/`blocks_per_group`/`feature_ro_compat`, so removing
+the `from_superblock` there would either DUPLICATE the cluster-ratio derivation (breaks
+single-source-of-truth) or thread the caller's geo through ~5 alloc/free helpers
+(churn). Neither is the clean single-field elimination the inode_size/locate_inode
+siblings were. Not landed. (Unlike those two: their geo use was purely VERBATIM fields.)
+
+**Frontier (remote-only):** the in-lane micro-lever surface is exhausted — the sharded
+`from_superblock` vein is mined (spread_seed 9a5c795f, inode_size da1c804d, locate_inode
+77e94d08; the rest pass the full `FsGeometry` to the allocator = justified), the default
+hot paths are cache-guarded, and the one real default-path candidate (extent-meta walk)
+is already fast-pathed + correctness-gated. The remaining levers are the LOCAL cutover
+(the 3.7x measurement + e2fsck) and the peer-owned lanes (ffs-btrfs / ffs-btree /
+ffs-block). No further remote-only micro-lever should be manufactured without a profile.
+
 ## `bd-bhh0i` `ext4_sharded_locate_inode` reads verbatim superblock fields, not a whole `FsGeometry` + the extent-meta double-walk candidate - 2026-07-14 (KEEP + BOUND)
 
 Status: KEEP (the hotter sibling of the inode_size field read) + BOUND (skipping the
