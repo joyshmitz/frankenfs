@@ -13,6 +13,24 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Block-cache locking: sharded per-shard Mutex is the deliberate benched choice - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed the per-block-read cache lock; a deliberate, already-benched
+decision. No lever.
+
+Every hot cache (`ext4_file_data_block_cache`, `ext4_inode_table_block_cache`,
+`ext4_base_block_cache`, `ext4_group_desc_cache`, `ext4_inode_attr_cache`, btrfs node/
+dir/extent caches) is a `ShardedCache` = FFS_CACHE_SHARDS shards, each a
+`Mutex<FxHashMap>`; the hit path locks ONLY the key's shard + clones the value. The
+`cache_get_rwlock` bench (bd-tag2s) A/B'd a SINGLE `Mutex` vs SINGLE `RwLock` — and the
+adopted answer is SHARDING (per-shard Mutex), which beats a single RwLock: true
+per-shard parallelism with no shared read-count atomic. A per-shard `RwLock` (instead
+of Mutex) would help only the rare case of two threads hitting the SAME shard for reads
+simultaneously (prob ~1/shards for random blocks) while paying RwLock's higher
+uncontended cost on EVERY get — the d3ab1bb8 "sharding already handles contention →
+RwLock marginal-to-negative" pattern. Not a lever without a profile showing same-shard
+read contention. Settled.
+
 ## MVCC flush/fsync path (ShardedMvccStore::flush_to_device): already coalesce-optimized - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed the flush path (per fsync/sync); already optimized. No lever.
