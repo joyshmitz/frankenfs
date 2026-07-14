@@ -48,5 +48,9 @@ harness = false
 name = "inode_block_patch"
 harness = false
 
+[[bench]]
+name = "arc_publish_vs_deep_clone"
+harness = false
+
 [lints]
 workspace = true

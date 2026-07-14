@@ -32366,18 +32366,30 @@ impl OpenFs {
                 // heap `xattr_ibody: Vec<u8>` (never touched on the read path), so
                 // the per-read clone was ~6.6% of warm random-read plus its
                 // malloc/free churn (profiled). Every downstream use is `&inode`.
-                // On a miss, read, publish to the hot slot, and own it locally.
-                let parsed_storage;
+                // On a miss, read the inode. On a READ-ONLY mount, publish it into
+                // the hot slot by MOVING it into an `Arc` and sharing that Arc with
+                // the slot via a refcount clone — instead of deep-cloning the whole
+                // `Ext4Inode` (its heap `xattr_ibody: Vec<u8>` and all). The clone
+                // was the same per-read cost the hot-HIT path already eliminated
+                // (bd-cc-hotinode), just on the miss. On a writable mount (no
+                // publish) keep the owned inode with no Arc allocation. Byte-identical:
+                // the borrowed inode is the same value either way.
+                let parsed_owned;
+                let parsed_arc;
                 let inode: &Ext4Inode = match hot_hit {
                     Some(arc) => arc.as_ref(),
                     None => {
                         let parsed = self.read_inode_with_scope(cx, scope, canonical)?;
                         if read_only {
+                            let arc = Arc::new(parsed);
                             self.ext4_hot_inode
-                                .store(Some(Arc::new((canonical.0, Arc::new(parsed.clone())))));
+                                .store(Some(Arc::new((canonical.0, Arc::clone(&arc)))));
+                            parsed_arc = arc;
+                            parsed_arc.as_ref()
+                        } else {
+                            parsed_owned = parsed;
+                            &parsed_owned
                         }
-                        parsed_storage = parsed;
-                        &parsed_storage
                     }
                 };
                 // Fast path: exactly the uncompressed-extent case `read` fills a
