@@ -8,11 +8,11 @@
 //! `map_logical_to_physical` function.
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_btree::SearchResult;
 use ffs_error::Result as FfsResult;
-use ffs_ondisk::ExtentTree;
+use ffs_ondisk::{Ext4Extent, ExtentTree};
 use ffs_types::BlockNumber;
 use parking_lot::Mutex;
 use std::hint::black_box;
@@ -723,6 +723,65 @@ fn bench_extent_cache_eviction_ab(c: &mut Criterion) {
     group.finish();
 }
 
+// ── A/A/B: insert-range tail ordering ───────────────────────────────────────
+
+const INSERT_RANGE_TAIL_EXTENTS: u32 = 8_192;
+
+fn insert_range_tail_fixture(count: u32) -> Vec<Ext4Extent> {
+    (0..count)
+        .map(|i| Ext4Extent {
+            logical_block: i * 2,
+            raw_len: 1,
+            physical_start: 1_000_000 + u64::from(i) * 2,
+        })
+        .collect()
+}
+
+fn legacy_sort_tail_descending(mut tail: Vec<Ext4Extent>) -> Vec<Ext4Extent> {
+    tail.sort_by_key(|ext| std::cmp::Reverse(ext.logical_block));
+    tail
+}
+
+fn reverse_ordered_tail(mut tail: Vec<Ext4Extent>) -> Vec<Ext4Extent> {
+    tail.reverse();
+    tail
+}
+
+fn bench_insert_range_tail_order_ab(c: &mut Criterion) {
+    for count in [0, 1, INSERT_RANGE_TAIL_EXTENTS] {
+        let ascending = insert_range_tail_fixture(count);
+        let expected: Vec<Ext4Extent> = ascending.iter().rev().copied().collect();
+        assert_eq!(legacy_sort_tail_descending(ascending.clone()), expected);
+        assert_eq!(legacy_sort_tail_descending(ascending.clone()), expected);
+        assert_eq!(reverse_ordered_tail(ascending), expected);
+    }
+
+    let fixture = insert_range_tail_fixture(INSERT_RANGE_TAIL_EXTENTS);
+    let mut group = c.benchmark_group("extent_insert_range_tail_order_ab_8192");
+    group.bench_function("legacy_sort_descending_a", |b| {
+        b.iter_batched(
+            || fixture.clone(),
+            |tail| black_box(legacy_sort_tail_descending(tail)),
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function("legacy_sort_descending_b", |b| {
+        b.iter_batched(
+            || fixture.clone(),
+            |tail| black_box(legacy_sort_tail_descending(tail)),
+            BatchSize::LargeInput,
+        );
+    });
+    group.bench_function("reverse_ascending_tail", |b| {
+        b.iter_batched(
+            || fixture.clone(),
+            |tail| black_box(reverse_ordered_tail(tail)),
+            BatchSize::LargeInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_resolve,
     bench_extent_resolve_depth0,
@@ -739,5 +798,6 @@ criterion_group!(
     bench_extent_cache_invalidate_all,
     bench_extent_cache_eviction_at_capacity,
     bench_extent_cache_eviction_ab,
+    bench_insert_range_tail_order_ab,
 );
 criterion_main!(extent_resolve);

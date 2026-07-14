@@ -948,8 +948,9 @@ pub fn insert_range(
         },
     )?;
 
-    // Move right-to-left so shifted extents cannot collide.
-    tail.sort_by_key(|ext| std::cmp::Reverse(ext.logical_block));
+    // `walk_range` yields strictly ascending logical blocks, so reversing gives
+    // the identical right-to-left order without re-sorting the tail.
+    tail.reverse();
     for ext in &tail {
         ffs_btree::delete_range(
             cx,
