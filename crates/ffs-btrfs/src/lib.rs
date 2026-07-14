@@ -1648,21 +1648,16 @@ pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
             if uuid_is_set(&root.uuid) {
                 source_ids.entry(root.uuid).or_insert(entry.key.objectid);
             }
-            roots.push((entry.key.objectid, root));
+            if entry.key.objectid >= BTRFS_FIRST_FREE_OBJECTID && uuid_is_set(&root.parent_uuid) {
+                roots.push((entry.key.objectid, root));
+            }
         }
     }
 
     let mut snapshots = Vec::new();
 
-    // Collect all parsed ROOT_ITEM entries with parent_uuid set.
+    // Build snapshots from the candidates retained above.
     for (id, root) in roots {
-        if id < BTRFS_FIRST_FREE_OBJECTID {
-            continue;
-        }
-        if !uuid_is_set(&root.parent_uuid) {
-            continue;
-        }
-
         // Find the source subvolume by matching parent_uuid to uuid.
         let source_id = source_ids.get(&root.parent_uuid).copied().unwrap_or(0);
 
