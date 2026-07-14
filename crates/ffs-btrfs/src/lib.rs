@@ -1628,39 +1628,33 @@ fn uuid_is_set(uuid: &[u8; 16]) -> bool {
 /// it was created as a snapshot of another subvolume.
 #[must_use]
 pub fn enumerate_snapshots(entries: &[BtrfsLeafEntry]) -> Vec<BtrfsSnapshot> {
-    let mut snapshots = Vec::new();
-
-    // First pass: collect all ROOT_ITEM entries with parent_uuid set
+    let mut roots = Vec::new();
+    let mut source_ids = FxHashMap::default();
     for entry in entries {
         if entry.key.item_type != BTRFS_ITEM_ROOT_ITEM {
             continue;
         }
-        let id = entry.key.objectid;
+        if let Ok(root) = parse_root_item(&entry.data) {
+            if uuid_is_set(&root.uuid) {
+                source_ids.entry(root.uuid).or_insert(entry.key.objectid);
+            }
+            roots.push((entry.key.objectid, root));
+        }
+    }
+
+    let mut snapshots = Vec::new();
+
+    // Collect all parsed ROOT_ITEM entries with parent_uuid set.
+    for (id, root) in roots {
         if id < BTRFS_FIRST_FREE_OBJECTID {
             continue;
         }
-        let Ok(root) = parse_root_item(&entry.data) else {
-            continue;
-        };
         if !uuid_is_set(&root.parent_uuid) {
             continue;
         }
 
-        // Find the source subvolume by matching parent_uuid to uuid
-        let source_id = entries
-            .iter()
-            .find_map(|e| {
-                if e.key.item_type != BTRFS_ITEM_ROOT_ITEM {
-                    return None;
-                }
-                let src = parse_root_item(&e.data).ok()?;
-                if src.uuid == root.parent_uuid {
-                    Some(e.key.objectid)
-                } else {
-                    None
-                }
-            })
-            .unwrap_or(0);
+        // Find the source subvolume by matching parent_uuid to uuid.
+        let source_id = source_ids.get(&root.parent_uuid).copied().unwrap_or(0);
 
         // Find matching ROOT_REF for the snapshot name
         let name = entries
@@ -19994,6 +19988,51 @@ mod tests {
             snapshots.is_empty(),
             "regular subvolume should not be listed as snapshot"
         );
+    }
+
+    #[test]
+    fn enumerate_snapshots_uses_first_valid_uuid_source() {
+        let source_uuid = [3_u8; 16];
+        let mut malformed_source = make_root_item_with_uuids(0x1000, 10, 0, source_uuid, [0; 16]);
+        malformed_source.truncate(20);
+        let entries = vec![
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 300,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: malformed_source,
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 301,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x2000, 11, 0, source_uuid, [0; 16]),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 302,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x3000, 12, 0, source_uuid, [0; 16]),
+            },
+            BtrfsLeafEntry {
+                key: BtrfsKey {
+                    objectid: 400,
+                    item_type: BTRFS_ITEM_ROOT_ITEM,
+                    offset: 0,
+                },
+                data: make_root_item_with_uuids(0x4000, 13, 1, [4; 16], source_uuid),
+            },
+        ];
+
+        let snapshots = enumerate_snapshots(&entries);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].source_id, 301);
     }
 
     #[test]
