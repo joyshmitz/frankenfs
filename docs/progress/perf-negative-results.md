@@ -13,6 +13,39 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` read `inode_size` off the superblock, not a whole `FsGeometry` + geometry-caching is resize-unsafe - 2026-07-14 (KEEP + BOUND)
+
+Status: KEEP (a clean byte-identical sibling on the sharded create path) + BOUND
+(a mount-lifetime `FsGeometry` cache is NOT a lever — online resize makes it stale).
+
+**KEEP — `from_superblock(sb).inode_size` -> `sb.inode_size` (2 sharded sites).**
+`ext4_sharded_create_inode` and `ext4_sharded_write_inode` built the whole
+`FsGeometry::from_superblock(sb)` — a u64 group-count division plus a ~20-field
+struct build and a cluster-ratio feature check — only to read `.inode_size`, which
+`from_superblock` copies UNCHANGED from `sb.inode_size` (ffs-alloc:1533). The
+non-sharded inode path already reads `usize::from(sb.inode_size)` directly
+(lib.rs:5612/11452/38711); the two sharded sites were the odd ones out. Replaced with
+the direct field read. Byte-identical (same `u16`; bd_bhh0i suite 24/24 green). A/B
+(benches/bhh0i_geo_field, same binary): build_geometry **8.68 ns** -> direct_field
+**0.50 ns** = **~17x**, ~8 ns eliminated per sharded create/write. Feature-gated
+(`bhh0i_sharded_alloc`, default-off) -> realized post-cutover; a Pareto cleanup on
+the 3.7x target path (sibling of the spread-seed cache, 9a5c795f).
+
+**BOUND — a cached `FsGeometry` on `OpenFs` is NOT a lever (resize-unsafe).** The
+codebase recomputes `FsGeometry::from_superblock(sb)` at ~30 sites; the obvious
+"compute once at mount, reuse" caching is UNSOUND: `ext4_resize_fs`
+(EXT4_IOC_RESIZE_FS, lib.rs:37935) grows `blocks_count`/`group_count` online, so a
+mount-lifetime `OnceLock<FsGeometry>` would go stale after a resize (`total_blocks`,
+`group_count`, `total_inodes` are geometry fields). That is WHY the recompute is
+per-op. And it is not a hot-path cost anyway: the hot ops already cache what they
+need (`ext4_geometry: Ext4Geometry`, the `ext4_inode_table_locations` OnceLock); the
+remaining raw `from_superblock` calls are cold introspection (`count_free_*`,
+`free_space_summary`, statfs) or the default-off sharded path. Threading a
+per-op-scoped geo through the sharded helpers is resize-safe but high-churn (many
+callers incl. tests) for a default-off win. Retry predicate: only the per-op-scoped
+sharded hoist, and only if the cutover profiles `from_superblock` as >X% of create;
+never a mount-lifetime cache while online resize exists.
+
 ## `bd-bhh0i` cache the per-thread spread seed + remote-e2e-validation is infeasible - 2026-07-14 (KEEP + BOUND)
 
 Status: KEEP (a clean micro-lever on the parallel-create target path) + BOUND

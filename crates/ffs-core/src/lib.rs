@@ -18062,7 +18062,13 @@ impl OpenFs {
             FfsError::Format("sharded create inode: not an ext4 filesystem".into())
         })?;
         let csum_seed = sb.csum_seed();
-        let inode_size = usize::from(FsGeometry::from_superblock(sb).inode_size);
+        // Read `inode_size` straight off the superblock (a verbatim field) rather
+        // than building the whole `FsGeometry` — a u64 group-count division plus a
+        // ~20-field struct build and a cluster-ratio feature check — just to pull
+        // one `u16` out of it. Byte-identical (`from_superblock` copies
+        // `sb.inode_size` unchanged into `geo.inode_size`); matches the direct
+        // `usize::from(sb.inode_size)` the non-sharded inode path already uses.
+        let inode_size = usize::from(sb.inode_size);
 
         let alloc = self
             .ext4_sharded_alloc_inode(cx, dev, target, is_directory)?
@@ -18191,7 +18197,9 @@ impl OpenFs {
         let sb = self.ext4_superblock().ok_or_else(|| {
             FfsError::Format("sharded write inode: not an ext4 filesystem".into())
         })?;
-        let inode_size = usize::from(FsGeometry::from_superblock(sb).inode_size);
+        // Verbatim superblock field — no need to build the whole `FsGeometry` (see
+        // `ext4_sharded_create_inode`); byte-identical to `from_superblock(sb).inode_size`.
+        let inode_size = usize::from(sb.inode_size);
         let loc = self
             .ext4_sharded_locate_inode(ino)
             .ok_or_else(|| FfsError::Corruption {
