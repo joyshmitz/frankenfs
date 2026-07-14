@@ -8045,21 +8045,11 @@ pub struct SendStreamParseResult {
     pub commands: Vec<SendStreamCommand>,
 }
 
-const BTRFS_SEND_CRC32C_POLY: u32 = 0x82F6_3B78;
-
+/// Continue Btrfs send's raw (uncomplemented) CRC32C state through `data`.
+/// `crc32c_append` complements its input and output for the conventional API,
+/// so complementing on both sides preserves the kernel send-stream convention.
 fn btrfs_send_crc32c(seed: u32, data: &[u8]) -> u32 {
-    let mut crc = seed;
-    for byte in data {
-        crc ^= u32::from(*byte);
-        for _ in 0..8 {
-            crc = if crc & 1 == 0 {
-                crc >> 1
-            } else {
-                (crc >> 1) ^ BTRFS_SEND_CRC32C_POLY
-            };
-        }
-    }
-    crc
+    !ffs_types::crc32c_append(!seed, data)
 }
 
 fn send_stream_command_crc32c(command: &[u8]) -> u32 {
@@ -20852,7 +20842,7 @@ mod tests {
         }
 
         // bd-gasht — btrfs_send_crc32c foundational laws.
-        // btrfs_send_crc32c is the in-house CRC32C primitive (poly
+        // btrfs_send_crc32c is the raw-state CRC32C continuation (poly
         // 0x82F6_3B78 = bit-reversed Castagnoli) used by
         // send_stream_command_crc32c. The command-header CRC
         // computation (super::send_stream_command_crc32c) splits the
@@ -20861,6 +20851,28 @@ mod tests {
         // primitive is associative. Sister bd-8pbjm (ext4_chksum),
         // bd-oviw2 (crc32c_append), bd-0djme (ext4_gdt_crc16) pin
         // the same laws for the other CRC primitives.
+
+        /// MR-0 — the accelerated continuation is bit-identical to the frozen
+        /// bitwise Castagnoli implementation it replaced.
+        #[test]
+        fn btrfs_send_crc32c_proptest_matches_bitwise_reference(
+            seed in proptest::prelude::any::<u32>(),
+            data in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..=4096),
+        ) {
+            const POLY: u32 = 0x82F6_3B78;
+            let mut expected = seed;
+            for byte in data.iter().copied() {
+                expected ^= u32::from(byte);
+                for _ in 0..8 {
+                    expected = if expected & 1 == 0 {
+                        expected >> 1
+                    } else {
+                        (expected >> 1) ^ POLY
+                    };
+                }
+            }
+            proptest::prop_assert_eq!(super::btrfs_send_crc32c(seed, &data), expected);
+        }
 
         /// MR-1 — Empty-suffix identity: f(seed, &[]) == seed.
         #[test]

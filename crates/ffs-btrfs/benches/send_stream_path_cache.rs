@@ -106,6 +106,16 @@ fn send_stream_command_crc32c(command: &[u8]) -> u32 {
     btrfs_send_crc32c(crc, &command[10..])
 }
 
+fn btrfs_send_crc32c_accelerated(seed: u32, data: &[u8]) -> u32 {
+    !ffs_types::crc32c_append(!seed, data)
+}
+
+fn send_stream_command_crc32c_accelerated(command: &[u8]) -> u32 {
+    let mut crc = btrfs_send_crc32c_accelerated(0, &command[..6]);
+    crc = btrfs_send_crc32c_accelerated(crc, &[0_u8; 4]);
+    btrfs_send_crc32c_accelerated(crc, &command[10..])
+}
+
 fn legacy_add_command(
     builder: &mut LegacySendStreamBuilder,
     command: (SendCommand, Vec<(SendAttr, Vec<u8>)>),
@@ -447,5 +457,49 @@ fn bench_send_stream_path_cache(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(send_stream_path_cache, bench_send_stream_path_cache);
+fn bench_send_stream_crc32c(c: &mut Criterion) {
+    const DATA_LEN: usize = 48 * 1024;
+
+    let mut frame = vec![0_u8; 10 + 4 + DATA_LEN];
+    frame[..4].copy_from_slice(&((4 + DATA_LEN) as u32).to_le_bytes());
+    frame[4..6].copy_from_slice(&(SendCommand::Write as u16).to_le_bytes());
+    frame[10..12].copy_from_slice(&(SendAttr::Data as u16).to_le_bytes());
+    frame[12..14].copy_from_slice(&(DATA_LEN as u16).to_le_bytes());
+    for (idx, byte) in frame[14..].iter_mut().enumerate() {
+        *byte = (idx as u8).wrapping_mul(37).wrapping_add(11);
+    }
+
+    for seed in [0, u32::MAX, 0x1234_5678] {
+        for data in [&[][..], b"btrfs-stream".as_slice(), frame.as_slice()] {
+            assert_eq!(
+                btrfs_send_crc32c(seed, data),
+                btrfs_send_crc32c_accelerated(seed, data),
+                "accelerated raw-seed CRC32C changed the checksum"
+            );
+        }
+    }
+    assert_eq!(
+        send_stream_command_crc32c(&frame),
+        send_stream_command_crc32c_accelerated(&frame),
+        "accelerated command CRC32C changed the framed checksum"
+    );
+
+    let mut group = c.benchmark_group("btrfs_send_crc32c_48k_command");
+    group.bench_function("bitwise_a", |b| {
+        b.iter(|| black_box(send_stream_command_crc32c(black_box(&frame))));
+    });
+    group.bench_function("bitwise_b", |b| {
+        b.iter(|| black_box(send_stream_command_crc32c(black_box(&frame))));
+    });
+    group.bench_function("accelerated", |b| {
+        b.iter(|| black_box(send_stream_command_crc32c_accelerated(black_box(&frame))));
+    });
+    group.finish();
+}
+
+criterion_group!(
+    send_stream_path_cache,
+    bench_send_stream_path_cache,
+    bench_send_stream_crc32c
+);
 criterion_main!(send_stream_path_cache);
