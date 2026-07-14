@@ -176,6 +176,34 @@ fn assert_model_matches_parser(block: &[u8]) {
     }
 }
 
+fn indexed_item_table_digest(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let mut digest = 0_u64;
+    for idx in 0..nritems {
+        let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base);
+        digest = digest.rotate_left(7) ^ u64::from(block[base + 8]);
+        digest = digest.rotate_left(7) ^ read_u64_at(block, base + 9);
+        digest = digest.rotate_left(7) ^ u64::from(read_u32_at(block, base + 17));
+        digest = digest.rotate_left(7) ^ u64::from(read_u32_at(block, base + 21));
+    }
+    digest
+}
+
+fn chunked_item_table_digest(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let items_end = BTRFS_HEADER_SIZE + nritems * BTRFS_ITEM_SIZE;
+    let mut digest = 0_u64;
+    for item in block[BTRFS_HEADER_SIZE..items_end].chunks_exact(BTRFS_ITEM_SIZE) {
+        digest = digest.rotate_left(7) ^ read_u64_at(item, 0);
+        digest = digest.rotate_left(7) ^ u64::from(item[8]);
+        digest = digest.rotate_left(7) ^ read_u64_at(item, 9);
+        digest = digest.rotate_left(7) ^ u64::from(read_u32_at(item, 17));
+        digest = digest.rotate_left(7) ^ u64::from(read_u32_at(item, 21));
+    }
+    digest
+}
+
 fn bench_parse_dense_leaf(c: &mut Criterion) {
     // Default btrfs nodesize (16 KiB), 1-byte payloads → ~626 items.
     let leaf_16k = build_dense_leaf(16 * 1024, 1);
@@ -211,9 +239,30 @@ fn bench_payload_coverage_ab(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_item_table_decode_ab(c: &mut Criterion) {
+    let leaf_16k = build_dense_leaf(16 * 1024, 1);
+    assert_eq!(
+        indexed_item_table_digest(&leaf_16k),
+        chunked_item_table_digest(&leaf_16k),
+        "fixed-width item-table iteration changed decoded fields"
+    );
+
+    let mut group = c.benchmark_group("btrfs_leaf_item_decode_ab");
+    for control in ["indexed_offsets_a", "indexed_offsets_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| black_box(indexed_item_table_digest(black_box(&leaf_16k))));
+        });
+    }
+    group.bench_function("fixed_width_chunks", |b| {
+        b.iter(|| black_box(chunked_item_table_digest(black_box(&leaf_16k))));
+    });
+    group.finish();
+}
+
 criterion_group!(
     btrfs_leaf,
     bench_parse_dense_leaf,
-    bench_payload_coverage_ab
+    bench_payload_coverage_ab,
+    bench_item_table_decode_ab
 );
 criterion_main!(btrfs_leaf);

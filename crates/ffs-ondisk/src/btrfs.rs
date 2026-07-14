@@ -1558,11 +1558,11 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
     let mut lowest_payload_start = block.len();
     let mut items: Vec<BtrfsItem> = Vec::with_capacity(nritems);
     let mut previous_key = None;
-    for idx in 0..nritems {
-        let base = BTRFS_HEADER_SIZE + idx * BTRFS_ITEM_SIZE;
+    let item_table = &block[BTRFS_HEADER_SIZE..items_end];
+    for item in item_table.chunks_exact(BTRFS_ITEM_SIZE) {
         let key = parse_ordered_key(
-            block,
-            base,
+            item,
+            0,
             &mut previous_key,
             "item_key",
             "leaf item keys not strictly increasing",
@@ -1570,7 +1570,7 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
 
         // On disk, leaf payload offsets are relative to the leaf header. Normalize
         // them to absolute block offsets for callers.
-        let raw_data_offset = read_le_u32(block, base + 17)?;
+        let raw_data_offset = read_le_u32(item, 17)?;
         let header_size =
             u32::try_from(BTRFS_HEADER_SIZE).map_err(|_| ParseError::IntegerConversion {
                 field: "header_size",
@@ -1582,7 +1582,7 @@ pub fn parse_leaf_items(block: &[u8]) -> Result<(BtrfsHeader, Vec<BtrfsItem>), P
                     field: "item_offset",
                     reason: "overflow",
                 })?;
-        let data_size = read_le_u32(block, base + 21)?;
+        let data_size = read_le_u32(item, 21)?;
 
         let data_offset_usize =
             usize::try_from(data_offset).map_err(|_| ParseError::IntegerConversion {
