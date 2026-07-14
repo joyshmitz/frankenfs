@@ -13,6 +13,26 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## ffs-dir htree-index sweep: binary-search where used, the rest is test-only/inherent - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed ffs-dir (a fresh crate); no production lever.
+
+- `htree_find_leaf_idx` / `htree_insert`: already `partition_point` (binary search over
+  the hash-sorted entries), not linear. Optimized.
+- `htree_remove`: uses a linear `.iter().position()`, BUT it has ZERO production
+  callers — only `#[cfg(test)]` sites (ffs-dir:1824/1827/2263/2272). Likewise
+  `htree_find_leaf` has no ffs-core caller: the ext4 htree hot path resolves inline in
+  ffs-core (`htree_resolve_logical`, benched), not through ffs-dir's API. So neither is
+  on a production hot path; binary-search-narrowing `htree_remove` would optimize
+  dead-for-prod code. Not a lever. (If ever wired to a hot delete path, note it is
+  also I/O-masked: each dir-entry delete writes the dir block + frees the inode, so the
+  in-memory O(#leaf-blocks) scan is dwarfed — the read_file_data segs/jobs "I/O-masked"
+  class.)
+- `block_contains_live_name` / the dir-block entry scans: inherent per-entry rec_len
+  walks (variable-length records, not SWAR-able).
+- The `.to_vec()` in the `*_tracked` variants (ffs-dir:267/794): load-bearing undo
+  snapshots for journaled rollback, not waste.
+
 ## ffs-extent read-resolve + ext4 block-resolve sweep: all optimized - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed the file-read logical→physical resolve path (a different crate
