@@ -543,16 +543,19 @@ pub fn remove_xattr(
     // Capture emptiness before handing ownership of `external_entries` to the
     // owned builder (which sorts it in place without a clone).
     let external_now_empty = external_entries.is_empty();
-    let new_block = build_external_block_owned(block.len(), external_entries)?;
-    inode.xattr_ibody = build_inline_ibody_for_inode_state(
-        inode.xattr_ibody.len(),
-        &inline_entries,
-        !external_now_empty,
-    )?;
-    block.copy_from_slice(&new_block);
     if external_now_empty {
+        let new_ibody =
+            build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, false)?;
+        inode.xattr_ibody = new_ibody;
+        block.fill(0);
         inode.file_acl = 0;
+        return Ok(true);
     }
+
+    let new_block = build_external_block_owned(block.len(), external_entries)?;
+    inode.xattr_ibody =
+        build_inline_ibody_for_inode_state(inode.xattr_ibody.len(), &inline_entries, true)?;
+    block.copy_from_slice(&new_block);
     Ok(true)
 }
 

@@ -117,6 +117,15 @@ fn moved_inline_candidate(
     entries
 }
 
+fn clear_external_block_old(block: &mut [u8]) {
+    let new_block = vec![0_u8; block.len()];
+    block.copy_from_slice(&new_block);
+}
+
+fn clear_external_block_in_place(block: &mut [u8]) {
+    block.fill(0);
+}
+
 fn bench_exists_probe(c: &mut Criterion) {
     let (inode, block) = build_populated();
     let access = read_access();
@@ -245,10 +254,45 @@ fn bench_new_inline_candidate(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_external_empty_clear(c: &mut Criterion) {
+    let populated = vec![0xa5_u8; BLOCK_SIZE];
+    let mut old = populated.clone();
+    let mut new = populated.clone();
+    clear_external_block_old(&mut old);
+    clear_external_block_in_place(&mut new);
+    assert_eq!(old, new, "external block clear bytes diverged");
+
+    let mut group = c.benchmark_group("xattr_external_empty_clear_4k");
+    for control in ["allocate_zero_copy_a", "allocate_zero_copy_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || populated.clone(),
+                |mut block| {
+                    clear_external_block_old(black_box(&mut block));
+                    black_box(block)
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("fill_owned_block", |b| {
+        b.iter_batched(
+            || populated.clone(),
+            |mut block| {
+                clear_external_block_in_place(black_box(&mut block));
+                black_box(block)
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_exists_probe,
     bench_zero_initialized_external_block,
-    bench_new_inline_candidate
+    bench_new_inline_candidate,
+    bench_external_empty_clear
 );
 criterion_main!(benches);
