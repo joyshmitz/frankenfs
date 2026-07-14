@@ -18110,18 +18110,23 @@ impl OpenFs {
     /// Stage `inode` into its inode-table slot under a SLOT-SCOPED merge proof
     /// (bd-bhh0i slice 2b) — the merge-aware sibling of `ffs_inode::write_inode_at`
     /// for the sharded (no-write-lock) path. It reproduces `write_inode_at`
-    /// (serialize the inode's slot bytes, read the table block with read-your-
-    /// writes, patch just this inode's `[byte_offset, byte_offset + inode_size)`
-    /// slot, write the whole block) EXCEPT the write auto-commits under
+    /// (serialize the inode's slot bytes, read the table block, patch just this
+    /// inode's `[byte_offset, byte_offset + inode_size)` slot, write the whole
+    /// block) EXCEPT the write auto-commits under
     /// `MergeProof::timestamp_only_inode_range` instead of the default `Unsafe`
     /// proof the generic `dev.write_block` stages. So two concurrent sharded
     /// creates writing DISJOINT inode slots of the same 4 KiB table block MERGE
     /// instead of first-committer-wins conflicting — the parallel-create
     /// bottleneck the cutover hit ("first-committer-wins conflict on block 657").
-    /// Byte-identical single-threaded: the patched block is the same bytes
-    /// `write_inode_at` would land, committed to the same store; the proof is
-    /// consulted ONLY on a commit conflict, which cannot occur without a
-    /// concurrent writer.
+    ///
+    /// The read-modify-write runs through `rmw_commit_block_with_proof`, which
+    /// reads the base block AT THE TRANSACTION'S OWN SNAPSHOT (begin-then-read) —
+    /// a base read taken beforehand could be older than the transaction, and the
+    /// no-conflict install path would then clobber a concurrently-committed slot
+    /// of this block (see that method's contract). Byte-identical single-threaded:
+    /// the patched block is the same bytes `write_inode_at` would land, committed
+    /// to the same store; the proof and the snapshot-consistent read only matter
+    /// under a concurrent writer.
     #[cfg(feature = "bhh0i_sharded_alloc")]
     #[allow(clippy::too_many_arguments)]
     fn ext4_sharded_stage_inode_slot(
@@ -18138,28 +18143,33 @@ impl OpenFs {
         // preferring a stack buffer for the standard 128/256-byte inode_size.
         let mut stack = [0u8; 256];
         let mut heap: Vec<u8>;
-        let slot: &mut [u8] = if inode_size <= stack.len() {
+        let serialized: &mut [u8] = if inode_size <= stack.len() {
             &mut stack[..inode_size]
         } else {
             heap = vec![0u8; inode_size];
             &mut heap
         };
-        ffs_inode::serialize_inode_with_checksum(inode, inode_size, ino, csum_seed, slot);
+        ffs_inode::serialize_inode_with_checksum(inode, inode_size, ino, csum_seed, serialized);
+        let slot: &[u8] = serialized;
 
-        // Read-modify-write the inode-table block (read-your-writes via the
-        // sharded adapter's live snapshot), patch only this inode's slot, then
-        // auto-commit the whole block under a slot-scoped merge proof.
-        let mut block_data = dev.read_block(cx, loc.block)?.as_slice().to_vec();
-        if loc.byte_offset + inode_size > block_data.len() {
-            return Err(FfsError::Corruption {
-                block: loc.block.0,
-                detail: "inode extends beyond block boundary".into(),
-            });
-        }
-        block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(slot);
+        // Patch only this inode's slot into the base block; the base is read at the
+        // transaction's own snapshot inside the RMW helper (begin-then-read).
         let proof = MergeProof::timestamp_only_inode_range(loc.byte_offset, inode_size);
-        self.mvcc_store
-            .autocommit_block_with_proof(loc.block, block_data, proof)
+        self.mvcc_store.rmw_commit_block_with_proof(
+            loc.block,
+            proof,
+            || Ok(dev.read_block(cx, loc.block)?.as_slice().to_vec()),
+            |block_data| {
+                if loc.byte_offset + inode_size > block_data.len() {
+                    return Err(FfsError::Corruption {
+                        block: loc.block.0,
+                        detail: "inode extends beyond block boundary".into(),
+                    });
+                }
+                block_data[loc.byte_offset..loc.byte_offset + inode_size].copy_from_slice(slot);
+                Ok(())
+            },
+        )
     }
 
     /// Write an inode via the sharded (no-write-lock) path (bd-bhh0i cutover

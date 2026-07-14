@@ -13,6 +13,58 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` sharded metadata RMW: snapshot-consistent base + the GDT finding - 2026-07-13 (KEEP hardening + BOUND next lever)
+
+Status: KEEP (soundness hardening landed) + BOUND (GDT is the confirmed remaining
+parallel-create conflict; its wiring is a bigger ffs-alloc refactor, next slice).
+
+**What landed (KEEP, this commit).** Slice 2b (last commit) wired the sharded inode
+write to stage the inode-table block under a slot-scoped `timestamp_only_inode_range`
+proof so concurrent DISJOINT-slot writers merge. But it read the base block via a
+SEPARATE adapter read taken BEFORE the auto-commit `begin()` — a read that can observe
+an OLDER version than the transaction. If a concurrent writer to the same block commits
+in the read→begin window, the RMW's own commit sees `observed <= snapshot.high` (NO
+conflict) and installs the stale-based block, SILENTLY CLOBBERING the concurrent
+writer's disjoint slot — a corruption the merge proof cannot catch (the conflict path
+is never entered). Fixed: `FsMvccStore::rmw_commit_block_with_proof` does begin →
+read AT `txn.snapshot()` (`read_visible`, else base device) → patch → stage-with-proof
+→ commit. A commit after `begin` now forces `observed > snapshot.high` → the
+conflict/merge path (overlays only the declared range onto latest = correct); with no
+intervening commit the read is current and the install is fresh. Byte-identical
+single-threaded (same bytes, same store); the snapshot-consistent read only matters
+under a concurrent writer. Gate: `cargo test -p ffs-core --features bhh0i_sharded_alloc
+bd_bhh0i` = 23/23 (incl. the disjoint-slot merge test + create/write byte-id
+sentinels); default-features build clean. Concurrent soundness itself is validated at
+the local cutover (slice 5, e2fsck-gated) — remote tests skip the image.
+
+**The GDT finding (BOUND — the remaining conflict; next lever).** Confirmed the OTHER
+shared-metadata block that FCW-conflicts on parallel create is the GROUP-DESCRIPTOR
+(GDT) block. Evidence: the sharded inode alloc (`sharded_alloc::PerGroupAlloc::
+alloc_inode` → `ffs_alloc::try_alloc_inode_in_group_persist_core`, ffs-alloc:3437)
+persists the group descriptor PER ALLOC via `persist_group_desc_..._with_bitmap_
+overrides` → `dev.write_block(gdt_block, ..)` (ffs-alloc:2243), staged under the
+default `Unsafe` proof. All group descriptors for a small fs live in ONE GDT block, and
+the per-group lock protects only the group's OWN bitmap block — NOT the shared GDT
+block. So two concurrent creates in DIFFERENT groups both write that GDT block →
+first-committer-wins conflict ("block 657"). The write is a clean per-descriptor RMW:
+it patches only `buf[offset_in_block .. offset_in_block + desc_size]` (offset =
+`(group % descs_per_block) * desc_size`, ffs-alloc:2145), so disjoint-group descriptors
+are a textbook range-overlay merge (`independent_key_range(offset, desc_size)`).
+
+Why NOT wired this turn: the GDT read+patch+write lives inside ffs-alloc's persist path,
+shared with the single-lock path, and — like the inode case above — must read AT the
+transaction's snapshot to be sound (a naive trait-level `write_block_disjoint` hint that
+keeps the pre-read in `persist_group_desc` reintroduces the exact stale-clobber window
+just fixed). Doing it right = threading a begin-first snapshot-consistent RMW through
+`try_alloc_inode_in_group_persist_core` (or lifting the GDT write into a proof-carrying
+ffs-core helper), which is a multi-file slice, not a one-turn drop-in. Superblock
+free-totals are NOT a sibling: `ext4_sync_superblock_free_totals` /
+`ext4_persist_group_descriptors_from` run at the durability boundary via a DIRECT
+(non-MVCC) device adapter, not per-create — no per-create FCW surface there.
+Retry predicate: next slice = snapshot-consistent GDT descriptor RMW under a
+per-descriptor `independent_key_range` proof; gate the sharded bd_bhh0i suite + local
+e2fsck at cutover.
+
 ## Frontier state: quick single-turn micro-lever surface EXHAUSTED - 2026-07-13 (BOUND)
 
 Status: BOUND — where the remaining perf is, and where it ISN'T (stop micro-hunting).

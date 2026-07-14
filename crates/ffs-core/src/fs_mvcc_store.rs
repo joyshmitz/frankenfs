@@ -148,24 +148,48 @@ impl FsMvccStore {
             .then(|| self.prune_safe())
     }
 
-    /// Auto-commit a single full-block write staged under a specific merge
-    /// `proof` — the proof-carrying sibling of [`FsMvccBlockDevice::write_block`],
-    /// which stages the default `Unsafe` proof. The sharded (no-write-lock) inode
-    /// write path (bd-bhh0i slice 2b) uses this to stage the patched inode-table
-    /// block under a SLOT-SCOPED `timestamp_only_inode_range` proof, so two
-    /// concurrent creates writing DISJOINT inode slots of the same 4 KiB table
-    /// block MERGE instead of first-committer-wins conflicting — the parallel-
-    /// create bottleneck the cutover panicked on ("first-committer-wins conflict
-    /// on block 657", a shared inode-table/GDT block). Identical begin/commit/
-    /// prune sequence to `write_block`; only the staged proof differs.
+    /// Read-modify-write one block in a single auto-committed transaction, staged
+    /// under a merge `proof` — the proof-carrying, SNAPSHOT-CONSISTENT sibling of
+    /// [`FsMvccBlockDevice::write_block`] (which stages the default `Unsafe` proof
+    /// and takes pre-read bytes). The sharded (no-write-lock) inode write path
+    /// (bd-bhh0i slice 2b) uses this to stage the patched inode-table block under
+    /// a SLOT-SCOPED `timestamp_only_inode_range` proof, so two concurrent creates
+    /// writing DISJOINT inode slots of the same 4 KiB table block MERGE instead of
+    /// first-committer-wins conflicting.
+    ///
+    /// Crucially the base block is read AT THE TRANSACTION'S OWN SNAPSHOT (`begin`
+    /// first, then read), NOT via a separate adapter read taken beforehand. A read
+    /// taken BEFORE `begin` can observe an OLDER version than the transaction: if a
+    /// concurrent writer to the same block commits in that window, the RMW's own
+    /// commit sees `observed <= snapshot.high` (no conflict) and INSTALLS the
+    /// stale-based block, silently clobbering the concurrent writer's disjoint slot
+    /// — a corruption the merge proof cannot catch because the conflict path is
+    /// never entered. Reading at `txn.snapshot()` closes that window: a commit
+    /// after `begin` forces `observed > snapshot.high` → the conflict/merge path,
+    /// which overlays only this write's declared range onto the latest version
+    /// (correct); with no intervening commit the read is current and the install is
+    /// fresh. `read_base` supplies the block bytes only when the store holds no
+    /// version at the snapshot (block still on the device); it must read the same
+    /// block (its snapshot is immaterial — no version means no concurrent overlay).
     #[cfg(feature = "bhh0i_sharded_alloc")]
-    pub(super) fn autocommit_block_with_proof(
+    pub(super) fn rmw_commit_block_with_proof<R, P>(
         &self,
         block: BlockNumber,
-        data: Vec<u8>,
         proof: ffs_mvcc::MergeProof,
-    ) -> FfsResult<()> {
+        read_base: R,
+        patch: P,
+    ) -> FfsResult<()>
+    where
+        R: FnOnce() -> FfsResult<Vec<u8>>,
+        P: FnOnce(&mut Vec<u8>) -> FfsResult<()>,
+    {
         let mut txn = self.begin();
+        let snapshot = txn.snapshot();
+        let mut data = match self.read_visible(block, snapshot) {
+            Some(bytes) => bytes,
+            None => read_base()?,
+        };
+        patch(&mut data)?;
         txn.stage_write_with_proof(block, data, proof);
         let commit_seq = self
             .commit(txn)
