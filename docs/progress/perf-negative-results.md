@@ -13,6 +13,35 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Frontier state: quick single-turn micro-lever surface EXHAUSTED - 2026-07-13 (BOUND)
+
+Status: BOUND — where the remaining perf is, and where it ISN'T (stop micro-hunting).
+
+After a long solo campaign (9 landed byte-identical wins this session + prior) plus an
+active peer swarm (bd-k2wc7/OliveCliff mining btree/extent/inode-truncate), the
+per-op CPU/alloc surface is harvested:
+- **ext4 create/`ext4_add_dir_entry`/`ext4_create` are alloc-LEAN** — no per-op
+  `collect`/`clone`/`to_vec`/`format!`/`Vec::new` in the hot bodies. The create-path
+  CPU (the parallel-create 3.7x target) is NOT where the gap is.
+- Read path (getattr/lookup/read/readdir) mined: hot-inode borrow+Arc-share, AttrOnly
+  parse, snapshot-unpin, block-patch make_mut, RangeOverlay merge, write_blocks/
+  contention-metrics gating. Remaining read allocs (read_file_data segs/jobs) are
+  I/O-masked.
+- `MvccStore::commit`'s per-commit `Instant::now()` is NOT gate-able like the ffs-core
+  `commit_transaction` sibling (which guards it on `tracing::enabled!(INFO)`): here the
+  duration feeds `record_commit_success` → the CONSUMED `commit_latency_us` histogram
+  exposed via `MvccRuntimeMetricsSnapshot`, not an info!-only record. Porting gotcha.
+
+**The remaining real lever is STRUCTURAL, not a micro-lever:** the parallel-commit
+scaling gap (3.7x on parallel create) lives in the MVCC commit STRUCTURE — the
+`CommitPublicationGate` in-order publish (a global Mutex/serialization per commit;
+lock-free fast path has a lost-wakeup hazard = Loom-gated) and inode-table
+merge-proof wiring (make concurrent same-table-block inode writes MERGE not FCW-
+conflict; write_inode has no proof channel = multi-turn + local-e2fsck-gated). These
+are the deliberate multi-turn efforts, NOT quick single-turn micro-levers. Retry
+predicate for micro-levers: a FRESH profile revealing a new CPU-bound per-op frame;
+absent that, do the structural work (Loom + local gate) or ledger bounds.
+
 ## Read/commit-path candidate bounds (3 non-levers) - 2026-07-13 (REJECT / BOUND)
 
 Status: REJECT — bounds 3 tempting-but-wrong candidates surfaced by an Explore scan,
