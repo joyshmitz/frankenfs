@@ -1,7 +1,7 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_possible_truncation)]
 
-//! Same-process A/B for the `build_writeback_blocks` lookup (bd-avqg1).
+//! Same-process A/Bs for recovery orchestration primitives.
 //!
 //! `RecoverySession::build_writeback_blocks` maps each recovered block back to
 //! its scrub-time "expected current" bytes. The old code did this with an
@@ -107,5 +107,89 @@ fn bench_lookup(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_lookup);
+const ABSOLUTE_SOURCE_START: u64 = 1_000_000;
+const ABSOLUTE_SOURCE_BLOCKS: u32 = 8_192;
+
+fn normalize_indices(indices: &mut Vec<u32>, source_block_count: u32) -> Result<(), &'static str> {
+    indices.sort_unstable();
+    indices.dedup();
+    if indices.iter().any(|&idx| idx >= source_block_count) {
+        return Err("outside source range");
+    }
+    Ok(())
+}
+
+fn map_absolute_blocks(corrupt_blocks: &[u64]) -> Result<Vec<u32>, &'static str> {
+    let end = ABSOLUTE_SOURCE_START + u64::from(ABSOLUTE_SOURCE_BLOCKS);
+    let mut indices = Vec::with_capacity(corrupt_blocks.len());
+    for &block in corrupt_blocks {
+        if block < ABSOLUTE_SOURCE_START || block >= end {
+            return Err("outside source range");
+        }
+        indices.push(
+            u32::try_from(block - ABSOLUTE_SOURCE_START).map_err(|_| "index does not fit u32")?,
+        );
+    }
+    normalize_indices(&mut indices, ABSOLUTE_SOURCE_BLOCKS)?;
+    Ok(indices)
+}
+
+fn legacy_double_normalize(corrupt_blocks: &[u64]) -> Result<Vec<u32>, &'static str> {
+    let indices = map_absolute_blocks(corrupt_blocks)?;
+    let mut normalized = indices.to_vec();
+    normalize_indices(&mut normalized, ABSOLUTE_SOURCE_BLOCKS)?;
+    Ok(normalized)
+}
+
+fn owned_normalized_handoff(corrupt_blocks: &[u64]) -> Result<Vec<u32>, &'static str> {
+    map_absolute_blocks(corrupt_blocks)
+}
+
+fn bench_absolute_recovery_normalization_handoff(c: &mut Criterion) {
+    let cases = [
+        Vec::new(),
+        vec![ABSOLUTE_SOURCE_START],
+        vec![
+            ABSOLUTE_SOURCE_START + 4,
+            ABSOLUTE_SOURCE_START,
+            ABSOLUTE_SOURCE_START + 4,
+            ABSOLUTE_SOURCE_START + 1,
+        ],
+        vec![ABSOLUTE_SOURCE_START - 1],
+        vec![ABSOLUTE_SOURCE_START + u64::from(ABSOLUTE_SOURCE_BLOCKS)],
+    ];
+    for corrupt_blocks in &cases {
+        assert_eq!(
+            legacy_double_normalize(corrupt_blocks),
+            owned_normalized_handoff(corrupt_blocks),
+            "absolute recovery normalization handoff diverged for {corrupt_blocks:?}"
+        );
+    }
+
+    let corrupt_blocks: Vec<u64> = (0..4_096_u64)
+        .map(|idx| ABSOLUTE_SOURCE_START + idx)
+        .collect();
+    assert_eq!(
+        legacy_double_normalize(&corrupt_blocks),
+        owned_normalized_handoff(&corrupt_blocks)
+    );
+
+    let mut group = c.benchmark_group("recovery_absolute_indices_double_normalize_ab_4096");
+    group.bench_function("legacy_double_normalize_a", |b| {
+        b.iter(|| black_box(legacy_double_normalize(black_box(&corrupt_blocks))));
+    });
+    group.bench_function("legacy_double_normalize_b", |b| {
+        b.iter(|| black_box(legacy_double_normalize(black_box(&corrupt_blocks))));
+    });
+    group.bench_function("owned_normalized_handoff", |b| {
+        b.iter(|| black_box(owned_normalized_handoff(black_box(&corrupt_blocks))));
+    });
+    group.finish(); // ubs:ignore — Criterion finalization; no security token generation.
+}
+
+criterion_group!(
+    benches,
+    bench_lookup,
+    bench_absolute_recovery_normalization_handoff
+);
 criterion_main!(benches);

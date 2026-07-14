@@ -291,6 +291,16 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
             );
         }
 
+        self.recover_from_normalized_indices(cx, normalized)
+    }
+
+    /// Continue recovery with owned indices that are already validated, sorted,
+    /// and deduplicated for this session's source range.
+    fn recover_from_normalized_indices(
+        &self,
+        cx: &Cx,
+        normalized: Vec<u32>,
+    ) -> RecoveryAttemptResult {
         if normalized.is_empty() {
             return self.success_result(0, 0, 0, RecoveryDecoderStats::default(), Vec::new());
         }
@@ -380,7 +390,7 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         corrupt_blocks: &[BlockNumber],
     ) -> RecoveryAttemptResult {
         match self.map_corrupt_blocks_to_indices(corrupt_blocks) {
-            Ok(indices) => self.recover_from_indices(cx, &indices),
+            Ok(indices) => self.recover_from_normalized_indices(cx, indices),
             Err(err) => self.failure_result(
                 0,
                 corrupt_blocks.len(),
