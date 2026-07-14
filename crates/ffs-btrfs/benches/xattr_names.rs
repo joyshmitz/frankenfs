@@ -11,11 +11,13 @@
 //!
 //! Run per-crate:
 //!   CARGO_TARGET_DIR=/data/projects/frankenfs/.rch-targets/blackthrush-dig8 \
-//!   rch exec -- cargo bench --profile release-perf -p ffs-btrfs --bench xattr_names
+//!   rch exec -- cargo bench --profile release -p ffs-btrfs --bench xattr_names
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_btrfs::{parse_xattr_item_names, parse_xattr_items};
+use ffs_btrfs::{find_xattr_item_value, parse_xattr_item_names, parse_xattr_items};
+use ffs_types::ParseError;
 use std::hint::black_box;
+use std::time::Duration;
 
 const HEADER: usize = 30;
 const N: usize = 24;
@@ -63,5 +65,68 @@ fn bench(c: &mut Criterion) {
     bench_group(c, 128, "largeval");
 }
 
-criterion_group!(xattr_names, bench);
+fn parse_items_then_find(data: &[u8], target: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
+    Ok(parse_xattr_items(data)?
+        .into_iter()
+        .find(|item| item.name.as_slice() == target)
+        .map(|item| item.value))
+}
+
+fn assert_getxattr_isomorphic(data: &[u8], target: &[u8]) {
+    let control = parse_items_then_find(data, target);
+    let candidate = find_xattr_item_value(data, target);
+    match (control, candidate) {
+        (Ok(control), Ok(candidate)) => assert_eq!(candidate, control),
+        (Err(control), Err(candidate)) => {
+            assert_eq!(format!("{candidate:?}"), format!("{control:?}"));
+        }
+        (control, candidate) => panic!("getxattr verdict diverged: {control:?} != {candidate:?}"),
+    }
+}
+
+fn bench_getxattr_group(c: &mut Criterion, label: &str, payload: &[u8], target: &[u8]) {
+    let mut group = c.benchmark_group(format!("btrfs_getxattr_value_{label}"));
+    group
+        .sample_size(20)
+        .warm_up_time(Duration::from_secs(1))
+        .measurement_time(Duration::from_secs(2));
+    for control in ["parse_all_control_a", "parse_all_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                black_box(
+                    parse_items_then_find(black_box(payload), black_box(target))
+                        .expect("control parse"),
+                )
+            });
+        });
+    }
+    group.bench_function("find_value_only", |b| {
+        b.iter(|| {
+            black_box(
+                find_xattr_item_value(black_box(payload), black_box(target))
+                    .expect("candidate parse"),
+            )
+        });
+    });
+    group.finish();
+}
+
+fn bench_getxattr_value(c: &mut Criterion) {
+    let singleton = build_payload(1, 64);
+    assert_getxattr_isomorphic(&singleton, b"user.attr00");
+    assert_getxattr_isomorphic(&singleton, b"user.missing");
+
+    let collisions = build_payload(8, 64);
+    assert_getxattr_isomorphic(&collisions, b"user.attr07");
+    assert_getxattr_isomorphic(&collisions, b"user.missing");
+
+    let mut malformed_after_match = singleton.clone();
+    malformed_after_match.push(0);
+    assert_getxattr_isomorphic(&malformed_after_match, b"user.attr00");
+
+    bench_getxattr_group(c, "singleton_hit_64", &singleton, b"user.attr00");
+    bench_getxattr_group(c, "collision8_last_hit_64", &collisions, b"user.attr07");
+}
+
+criterion_group!(xattr_names, bench, bench_getxattr_value);
 criterion_main!(xattr_names);

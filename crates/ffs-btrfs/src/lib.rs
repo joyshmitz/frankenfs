@@ -1184,6 +1184,65 @@ pub fn parse_xattr_items(data: &[u8]) -> Result<Vec<BtrfsXattrItem>, ParseError>
     Ok(out)
 }
 
+/// Find the first matching XATTR_ITEM value without materializing every item.
+///
+/// The entire concatenated payload is still validated before a value is
+/// returned, so malformed entries after a match produce the same error as
+/// [`parse_xattr_items`]. For a valid payload this is equivalent to parsing all
+/// items and taking the first matching name, but allocates only the selected
+/// value (or nothing on a miss).
+pub fn find_xattr_item_value(data: &[u8], target: &[u8]) -> Result<Option<Vec<u8>>, ParseError> {
+    const HEADER: usize = 30;
+    let mut matched = None;
+    let mut cur = 0_usize;
+    while cur < data.len() {
+        if cur + HEADER > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: HEADER,
+                offset: cur,
+                actual: data.len() - cur,
+            });
+        }
+        let data_len = usize::from(u16::from_le_bytes([data[cur + 25], data[cur + 26]]));
+        let name_len = usize::from(u16::from_le_bytes([data[cur + 27], data[cur + 28]]));
+        if name_len == 0 {
+            return Err(ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "must be non-zero",
+            });
+        }
+
+        let name_start = cur + HEADER;
+        let name_end = name_start
+            .checked_add(name_len)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr.name_len",
+                reason: "overflow",
+            })?;
+        let value_end = name_end
+            .checked_add(data_len)
+            .ok_or(ParseError::InvalidField {
+                field: "xattr.data_len",
+                reason: "overflow",
+            })?;
+
+        if value_end > data.len() {
+            return Err(ParseError::InsufficientData {
+                needed: value_end,
+                offset: cur,
+                actual: data.len(),
+            });
+        }
+
+        if matched.is_none() && data[name_start..name_end] == *target {
+            matched = Some((name_end, value_end));
+        }
+        cur = value_end;
+    }
+
+    Ok(matched.map(|(start, end)| data[start..end].to_vec()))
+}
+
 /// Parse only the NAMES of the xattr items in a DIR_ITEM/XATTR_ITEM payload,
 /// without materialising values. `listxattr` needs names only, but
 /// [`parse_xattr_items`] copies each attribute's value into a fresh `Vec`
@@ -14004,13 +14063,30 @@ mod tests {
         assert_eq!(parsed[0].value, b"alpha");
         assert_eq!(parsed[1].name, b"user.b");
         assert!(parsed[1].value.is_empty());
+        assert_eq!(
+            find_xattr_item_value(&payload, b"user.a").expect("find first xattr"),
+            Some(b"alpha".to_vec())
+        );
+        assert_eq!(
+            find_xattr_item_value(&payload, b"user.b").expect("find empty xattr"),
+            Some(Vec::new())
+        );
+        assert_eq!(
+            find_xattr_item_value(&payload, b"user.missing").expect("miss xattr"),
+            None
+        );
         assert!(
             parse_xattr_items(&[])
                 .expect("parse empty xattr payload")
                 .is_empty()
         );
+        assert_eq!(
+            find_xattr_item_value(&[], b"user.a").expect("find in empty payload"),
+            None
+        );
 
         assert_insufficient_data(parse_xattr_items(&[0_u8; 29]), 30, 0, 29);
+        assert_insufficient_data(find_xattr_item_value(&[0_u8; 29], b"user.a"), 30, 0, 29);
 
         let empty_name = vec![0_u8; 30];
         assert_invalid_field(

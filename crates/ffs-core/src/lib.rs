@@ -49,11 +49,11 @@ use ffs_btrfs::{
     BtrfsExtentAllocator, BtrfsExtentData, BtrfsInodeItem, BtrfsKey, BtrfsLeafEntry,
     BtrfsMutationError, BtrfsNodeSerializeParams, BtrfsParsedNode, BtrfsRootItem, BtrfsTreeItem,
     InMemoryCowBtrfsTree, btrfs_inode_flags_to_fsflags, btrfs_inode_flags_to_xflags,
-    enumerate_snapshots, enumerate_subvolumes, fsflags_to_btrfs_inode_flags, generate_send_stream,
-    lookup_data_block_csum, map_logical_to_physical, parse_btrfs_tree_node_owned, parse_dir_items,
-    parse_extent_data, parse_inode_item, parse_root_item, parse_xattr_item_names,
-    parse_xattr_items, walk_chunk_tree, walk_tree, walk_tree_floor_with_nodes,
-    walk_tree_parallel_with_nodes, walk_tree_range_parallel_with_nodes,
+    enumerate_snapshots, enumerate_subvolumes, find_xattr_item_value, fsflags_to_btrfs_inode_flags,
+    generate_send_stream, lookup_data_block_csum, map_logical_to_physical,
+    parse_btrfs_tree_node_owned, parse_dir_items, parse_extent_data, parse_inode_item,
+    parse_root_item, parse_xattr_item_names, parse_xattr_items, walk_chunk_tree, walk_tree,
+    walk_tree_floor_with_nodes, walk_tree_parallel_with_nodes, walk_tree_range_parallel_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -30358,11 +30358,8 @@ impl OpenFs {
             let Some((_k, data)) = items.first() else {
                 return Ok(None);
             };
-            let parsed = parse_xattr_items(data).map_err(|e| parse_to_ffs_error(&e))?;
-            return Ok(parsed
-                .into_iter()
-                .find(|x| x.name == name.as_bytes())
-                .map(|x| x.value));
+            return find_xattr_item_value(data, name.as_bytes())
+                .map_err(|e| parse_to_ffs_error(&e));
         }
 
         // Read-only path: the xattr's name hash IS its key offset, so only the
@@ -30384,11 +30381,10 @@ impl OpenFs {
         };
         let items = self.walk_btrfs_fs_tree_range(cx, lo, hi)?;
         for item in &items {
-            let parsed = parse_xattr_items(&item.data).map_err(|e| parse_to_ffs_error(&e))?;
-            for xattr in parsed {
-                if xattr.name == name.as_bytes() {
-                    return Ok(Some(xattr.value));
-                }
+            if let Some(value) = find_xattr_item_value(&item.data, name.as_bytes())
+                .map_err(|e| parse_to_ffs_error(&e))?
+            {
+                return Ok(Some(value));
             }
         }
         Ok(None)
