@@ -428,7 +428,8 @@ pub fn set_xattr(
     };
 
     if let Some(pos) = entry_index(&external_entries, name_index, &name) {
-        external_entries[pos].value = value.to_vec();
+        external_entries[pos].value.clear();
+        external_entries[pos].value.extend_from_slice(value);
         let Some(block) = external_block.as_mut() else {
             return Err(FfsError::Format(
                 "external xattr entries exist but no external block was provided".to_owned(),

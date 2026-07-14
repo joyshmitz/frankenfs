@@ -126,6 +126,18 @@ fn clear_external_block_in_place(block: &mut [u8]) {
     block.fill(0);
 }
 
+fn allocate_external_value_replace(old: Vec<u8>, value: &[u8]) -> Vec<u8> {
+    let replacement = value.to_vec();
+    drop(old);
+    replacement
+}
+
+fn reuse_external_value_replace(mut old: Vec<u8>, value: &[u8]) -> Vec<u8> {
+    old.clear();
+    old.extend_from_slice(value);
+    old
+}
+
 fn bench_exists_probe(c: &mut Criterion) {
     let (inode, block) = build_populated();
     let access = read_access();
@@ -288,11 +300,61 @@ fn bench_external_empty_clear(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_external_value_replace(c: &mut Criterion) {
+    const VALUE_SIZE: usize = 1024;
+
+    for (old_len, new_len) in [
+        (0, 0),
+        (VALUE_SIZE, 0),
+        (VALUE_SIZE, VALUE_SIZE),
+        (32, 2048),
+    ] {
+        let old = vec![0x3c; old_len];
+        let value = vec![0xa5; new_len];
+        assert_eq!(
+            allocate_external_value_replace(old.clone(), &value),
+            reuse_external_value_replace(old, &value),
+            "external value replacement diverged for {old_len} -> {new_len} bytes"
+        );
+    }
+
+    let value = vec![0xa5; VALUE_SIZE];
+    let mut group = c.benchmark_group("xattr_external_value_replace_1k");
+    for control in ["allocate_replacement_a", "allocate_replacement_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || vec![0x3c; VALUE_SIZE],
+                |old| {
+                    black_box(allocate_external_value_replace(
+                        black_box(old),
+                        black_box(&value),
+                    ))
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("reuse_parsed_value", |b| {
+        b.iter_batched(
+            || vec![0x3c; VALUE_SIZE],
+            |old| {
+                black_box(reuse_external_value_replace(
+                    black_box(old),
+                    black_box(&value),
+                ))
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_exists_probe,
     bench_zero_initialized_external_block,
     bench_new_inline_candidate,
-    bench_external_empty_clear
+    bench_external_empty_clear,
+    bench_external_value_replace
 );
 criterion_main!(benches);
