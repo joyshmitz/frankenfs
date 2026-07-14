@@ -13,6 +13,23 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Free/delete serial floor (free_inode/free_blocks_in_group): already optimized - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed the delete serial floor (free-path analog of the alloc floor);
+already optimized, mirroring the alloc path.
+
+- `free_blocks_in_group`: reserved-block overlap uses ONE binary search ("first reserved
+  block >= rel_start decides overlap for the whole run"), not a linear scan.
+- checksum update is incremental (single-bit clear via `BitmapChecksumUpdate`), not a
+  full-block recompute (same infra as the alloc path).
+- no `highest_set_bit_index`/scan on free: `itable_unused` is monotonic (min), so a free
+  never grows it back — nothing to recompute.
+- residual: `free_inode_in_group`/`free_blocks_in_group` do the per-op bitmap
+  `.as_slice().to_vec()`, the SAME marginal make_mut candidate already rejected for the
+  alloc path (Pareto but `read_visible_block_buf` Arc-shares the overlay version so it
+  clones for the hot repeated-op case = parity-tail, d3ab1bb8 neutral pattern). Not a
+  lever. The delete serial floor is mined, like the create floor.
+
 ## inode-bitmap padding fill: already byte-wise + O(1) fast path (was the #1 hot fn, already fixed) - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — probed `fill_inode_bitmap_padding_with_clear_undo` (per inode alloc,
