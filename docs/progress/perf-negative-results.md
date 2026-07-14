@@ -13,6 +13,26 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## inode-bitmap padding fill: already byte-wise + O(1) fast path (was the #1 hot fn, already fixed) - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — probed `fill_inode_bitmap_padding_with_clear_undo` (per inode alloc,
+create serial floor); already optimized, and its own comment shows it was ALREADY the
+profiled #1 hot function that got fixed.
+
+The inode bitmap block is `block_size` bytes but only `inodes_per_group` bits are used,
+so the padding region [inodes_per_group, block_size*8) is thousands of bits, set on
+EVERY inode alloc. It USED to scan bit-by-bit (with a per-bit `bitmap_get`) — the code
+comment records it was "the #1 hot function in parallel create (~13% self time)"
+because after the first alloc every padding bit is already set yet was re-scanned one
+bit at a time. It has since been rewritten: whole `0xFF` bytes skipped in O(1), a fast
+path that returns immediately once the FINAL byte is already `0xFF` (the padding is one
+contiguous block, so a set final byte ⇒ whole region padded ⇒ nothing to do), and only
+NEWLY-set bits recorded for rollback. The common already-padded case now touches no
+bit. The non-undo sibling `fill_inode_bitmap_padding` is byte-wise (0xFF whole bytes)
+too. No lever — this is exactly the profiled create-floor hot fn, already fixed
+(alongside highest_set_bit 05a28387, bitmap SWAR, incremental checksum, reserved
+no-alloc). The alloc create serial floor is thoroughly mined.
+
 ## Block-cache hasher + per-op timestamp: already optimal / not byte-id-changeable - 2026-07-14 (BOUND, no code)
 
 Status: BOUND — two more per-op hot spots probed, neither a lever.
