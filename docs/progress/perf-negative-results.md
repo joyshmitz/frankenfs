@@ -13,6 +13,42 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## `bd-bhh0i` cache the per-thread spread seed + remote-e2e-validation is infeasible - 2026-07-14 (KEEP + BOUND)
+
+Status: KEEP (a clean micro-lever on the parallel-create target path) + BOUND
+(remote end-to-end cutover validation is definitively infeasible).
+
+**KEEP — `bhh0i_spread_seed` thread-local cache (feature-gated, parallel-create path).**
+The sharded create/mkdir path calls `bhh0i_spread_seed()` once per op to pick the
+per-thread inode-scan start group. It recomputed a `SipHash` over
+`std::thread::current().id()` EVERY call — and `thread::current()` clones+drops the
+thread handle (an atomic `Arc` refcount round-trip) — even though the seed is a pure
+function of the stable `ThreadId` (invariant for the thread's life). Cached it in a
+`thread_local!` (lazy init once per thread; `.with(|s| *s)` read thereafter).
+Byte-identical: same `ThreadId` → same seed, so every call returns what the recompute
+would (bd_bhh0i suite 24/24 green, incl. the spread-dependent create/mkdir/parallel
+tests). A/B (benches/bhh0i_spread_seed, same-binary): recompute **21.09 ns** →
+cached **1.24 ns** = **~17x** on the op, ~20 ns eliminated per create/mkdir, CIs
+cleanly separated. VALUE CAVEAT: on the feature-gated (`bhh0i_sharded_alloc`,
+default-off) sharded path, so the ~20 ns/op is realized only once the cutover flips
+the default — a pre-emptive Pareto cleanup on the 3.7x target path, not a live
+production win today.
+
+**BOUND — remote end-to-end sharded-create validation is INFEASIBLE (closes the
+question raised at 6ed27b4a).** After remote-validating the merge MECHANISM under
+threads (6ed27b4a), the open question was whether the END-TO-END sharded create path
+(alloc + dir-entry + inode-table + GDT together) could also be validated remotely,
+so the local cutover would only need `e2fsck`. It cannot: the sharded create tests
+use `open_writable_ext4_mkfs`, which shells out to `mkfs.ext4` (absent on the fleet →
+those tests SKIP). The in-Rust `build_ext4_image` helpers are minimal SINGLE-GROUP
+128 KiB PARSE fixtures (hand-written superblock; no real bitmaps, GDT bitmap-block
+pointers, or root-dir structure) — insufficient to open+enable_writes and run a
+multi-group cross-group parallel create. Producing a real multi-group writable image
+in-Rust ≈ reimplementing `mkfs.ext4` (out of scope). ⇒ the cutover (create-bench +
+`e2fsck`, the 3.7x measurement) is genuinely LOCAL-ONLY; it cannot be reduced to a
+remote test. Retry predicate: only if a real in-Rust ext4 formatter is added
+(separate large effort) or the rch-remote-only constraint is lifted for the cutover.
+
 ## `bd-bhh0i` sharded metadata RMW: snapshot-consistent base + the GDT finding - 2026-07-13 (KEEP hardening + BOUND next lever)
 
 Status: KEEP (soundness hardening landed) + BOUND (GDT is the confirmed remaining

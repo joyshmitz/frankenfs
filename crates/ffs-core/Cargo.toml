@@ -189,6 +189,10 @@ name = "bd_bhh0i_contention"
 harness = false
 
 [[bench]]
+name = "bhh0i_spread_seed"
+harness = false
+
+[[bench]]
 name = "fsync_latency_workload"
 harness = false
 

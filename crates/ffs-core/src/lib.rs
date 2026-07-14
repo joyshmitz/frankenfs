@@ -18484,10 +18484,23 @@ impl OpenFs {
     /// single-thread run yields one seed (near-parent locality).
     #[cfg(feature = "bhh0i_sharded_alloc")]
     fn bhh0i_spread_seed() -> u32 {
-        use std::hash::{Hash, Hasher};
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        std::thread::current().id().hash(&mut hasher);
-        hasher.finish() as u32
+        // The Part-B spread seed is a pure function of the (stable) ThreadId, so it
+        // is invariant for the life of a thread. Cache it per thread rather than
+        // recompute it on EVERY create/mkdir: the recompute is a `thread::current()`
+        // handle clone+drop (an atomic Arc refcount round-trip) plus a SipHash over
+        // the id — tens of ns of pure per-op overhead on the parallel-create path.
+        // A thread-local read replaces that with a cached load. Byte-identical: the
+        // same ThreadId yields the same seed on every call, so the cached value
+        // equals what the recompute would return.
+        thread_local! {
+            static SEED: u32 = {
+                use std::hash::{Hash, Hasher};
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                std::thread::current().id().hash(&mut hasher);
+                hasher.finish() as u32
+            };
+        }
+        SEED.with(|seed| *seed)
     }
 
     /// `mknod(2)` for non-regular file types (char/block device, fifo,
