@@ -13,6 +13,41 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Read/commit-path candidate bounds (3 non-levers) - 2026-07-13 (REJECT / BOUND)
+
+Status: REJECT — bounds 3 tempting-but-wrong candidates surfaced by an Explore scan,
+so the fleet does not re-attempt them (esp. #2, a correctness trap).
+
+1. **`read_file_data` per-read `segs`/`jobs` Vec allocs** (ffs-core ~13119/13212):
+   RE-CONFIRMED I/O-masked / sub-noise. The Vec::new()+first-push is one small heap
+   alloc per read; a file read does device I/O (µs–ms) that dwarfs a ~50ns alloc
+   (matches the prior "file-read jobs / readdir planned = device-read-masked" bound).
+   Retry predicate: only if a profile shows these allocs as a material read-CPU frame
+   (they won't while reads are I/O-bound).
+
+2. **`readdir` `names = present.keys().cloned().collect()`** (ffs-core ~34498) is
+   NOT dead work — it is LOAD-BEARING. An Explore scan flagged it as "built but never
+   read on RO mounts" (lookup returns from `present` while `present: Some`). BUT on a
+   RO→writable transition (`enable_writes` does NOT clear `dir_name_index`), the next
+   create calls `note_dir_name_index_insert`, which flips `present: Some→None` and
+   inserts only the NEW name into `names` — so a lookup for an ORIGINAL entry then
+   falls to `!idx.names.contains(name)`. If `names` were built empty, that lookup
+   returns None for a present entry = CORRECTNESS BUG. `names` is the post-transition
+   membership fallback. DO NOT empty it. Retry predicate: none unless `enable_writes`
+   is changed to clear/invalidate the RO index (then it becomes truly dead).
+
+3. **`MvccStore::emit_transaction_commit` per-commit duration/runtime_metrics**
+   (ffs-mvcc ~2173) is already appropriately conditional: the `EvidenceRecord` build +
+   `sink.append` are gated on `evidence_sink: Some` (opt-in, None by default), and the
+   `started.elapsed()` → `record_commit_success` feeds a CONSUMED latency histogram
+   (runtime_metrics readers). Not dead, not cleanly gate-able. Retry predicate: none.
+
+Also this turn: 27c505c9 (read_into Arc-share, WIN #9) CONFIRMED correct — ffs-core
+1185 lib tests pass (all read tests green; only the pre-existing btrfs_reflink flake
+fails). Its magnitude bench (arc_publish_vs_deep_clone) + 826df090's preflight_metrics
+remain rch-BLOCKED (rch saturated ~all session by the peer swarm); anchored instead by
+the measured hot-HIT clone precedent (bd-cc-hotinode ~6.6%).
+
 ## `mvcc` cache-line-isolate the read-hot shard_mask - 2026-07-13 (REJECT)
 
 Status: REJECT / MEASURED NEUTRAL (refines the false-sharing lever class).
