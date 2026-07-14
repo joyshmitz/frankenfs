@@ -13,6 +13,36 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Alloc-path fresh-function sweep: all optimized (only highest_set_bit was a gap) - 2026-07-14 (BOUND, no code)
+
+Status: BOUND — after the `highest_set_bit_index` win, swept the neighbouring
+inode/block-alloc hot functions; every one is already optimized. No lever this turn.
+
+Probed (all already optimized, do NOT re-attempt):
+- `bitmap_find_contiguous_linear` (multi-block alloc): 4-words-at-a-time SWAR fast
+  path (bench `contiguous_scan_width`).
+- `bitmap_count_free` (free-count): word-path + scalar partial tail (tests
+  `..._word_path_handles_partial_tail`).
+- `reserved_inodes_in_group` (per inode alloc/free): returns a NO-ALLOC `Vec::new()`
+  for every group ≥ 1 (reserved inodes are all in group 0); the group-0 Vec is small
+  + transient (group 0 fills once). Not a lever.
+- htree `dx_hash` / `str2hashbuf` (per htree lookup/create): already uses a STACK
+  `[u32; 8]` buffer, not a per-call `vec!` (bd-cc-str2hashbuf-stack).
+- `stamp_bitmap_checksum_from_override` (per alloc): INCREMENTAL — a single-bit flip
+  uses `BitmapChecksumUpdate::Incremental` (`bitmap_checksum_incremental_from_flipped_
+  bit_range`), never a full-block crc32c recompute; `Full` only on bulk overrides.
+
+Considered + rejected (marginal): `try_alloc_inode_in_group_persist_core` does
+`bitmap_buf.as_slice().to_vec()` (a block-sized copy) per inode alloc. `make_mut()`
+(COW, cf. 8984db03) would be Pareto, BUT the bitmap block gains an MVCC overlay
+version after its first write, and `read_visible_block_buf` Arc-SHARES that version, so
+every subsequent same-group alloc's `make_mut` CLONES (== to_vec) — only the first
+base-read per group is free. On a create-storm that is parity-tail (the d3ab1bb8
+"neutral-in-practice → reject" pattern); the borrow-flow churn (the `&mut bitmap`
+threads through set-undo, find_free, padding, the override borrow, the write, and the
+error-path rollback) is not justified for a ~always-clone win. Retry predicate: only if
+a profile shows the per-alloc bitmap copy is non-trivial AND most reads are base-unique.
+
 ## `highest_set_bit_index` word-at-a-time reverse scan (inode-alloc itable_unused) - 2026-07-14 (KEEP)
 
 Status: KEEP — a real DEFAULT-path win on the create serial floor (the first
