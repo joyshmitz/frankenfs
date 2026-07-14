@@ -1677,7 +1677,10 @@ mod tests {
 
     #[test]
     fn indirect_cutoff_prefix_bound_matches_saturating_predicate() {
-        let ppb = 1024;
+        // `ppb: u64` (matches first_indirect_entry_at_cutoff's param): without the
+        // annotation `i` in `(0..ppb).find(|&i| i.saturating_mul(entry_span))` is an
+        // ambiguous `{integer}` and `saturating_mul` cannot resolve (E0689).
+        let ppb: u64 = 1024;
         for &(base, cutoff, entry_span) in &[
             (12, 11, 1),
             (12, 12, 1),
