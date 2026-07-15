@@ -735,9 +735,13 @@ impl ByteDevice for FileByteDevice {
             }
             let off = i64::try_from(offset.0)
                 .map_err(|_| FfsError::Format("read offset overflows i64".to_owned()))?;
-            let read = nix::sys::uio::preadv(self.file.as_ref(), bufs, off)
-                .map_err(std::io::Error::from)
-                .map_err(FfsError::Io)?;
+            let read = if let [buf] = bufs {
+                nix::sys::uio::pread(self.file.as_ref(), buf, off)
+            } else {
+                nix::sys::uio::preadv(self.file.as_ref(), bufs, off)
+            }
+            .map_err(std::io::Error::from)
+            .map_err(FfsError::Io)?;
             if read != total_len {
                 return Err(FfsError::Io(std::io::Error::new(
                     std::io::ErrorKind::UnexpectedEof,

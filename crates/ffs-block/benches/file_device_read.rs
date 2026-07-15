@@ -23,7 +23,7 @@
 //! binary keeps the comparison on a single CPU.
 
 use asupersync::Cx;
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_block::{ByteDevice, FileByteDevice};
 use ffs_types::ByteOffset;
 use std::hint::black_box;
@@ -118,6 +118,41 @@ fn main_bench(c: &mut Criterion) {
     });
 
     vgroup.finish();
+
+    // A one-iovec direct read has the same byte destination and one-syscall
+    // contract under either dispatch. Prove equality before timing the syscall
+    // primitive without destination-allocation noise.
+    let mut preadv_out = vec![0_u8; VSPAN];
+    let mut preadv_iov = [IoSliceMut::new(&mut preadv_out)];
+    let preadv_read = nix::sys::uio::preadv(&raw, &mut preadv_iov, 0).expect("preadv parity");
+    let mut pread_out = vec![0_u8; VSPAN];
+    let pread_read = nix::sys::uio::pread(&raw, &mut pread_out, 0).expect("pread parity");
+    assert_eq!(preadv_read, VSPAN);
+    assert_eq!(pread_read, preadv_read);
+    assert_eq!(pread_out, preadv_out);
+    assert_eq!(pread_out, data[..VSPAN]);
+
+    let mut single = c.benchmark_group("file_device_single_iovec_128k");
+    for control in ["preadv_one_iovec_a", "preadv_one_iovec_b"] {
+        single.bench_function(control, |b| {
+            b.iter_batched(
+                || vec![0_u8; VSPAN],
+                |mut out| {
+                    let mut iov = [IoSliceMut::new(&mut out)];
+                    black_box(nix::sys::uio::preadv(&raw, &mut iov, 0).expect("preadv"))
+                },
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    single.bench_function("pread_one_buffer", |b| {
+        b.iter_batched(
+            || vec![0_u8; VSPAN],
+            |mut out| black_box(nix::sys::uio::pread(&raw, &mut out, 0).expect("pread")),
+            BatchSize::SmallInput,
+        );
+    });
+    single.finish();
 }
 
 criterion_group!(file_device_read, main_bench);
