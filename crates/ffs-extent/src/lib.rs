@@ -1659,12 +1659,7 @@ impl ExtentCache {
 
         let key = (ns, mapping.logical_start);
 
-        // Evict if at capacity and this is a new key.
-        if inner.entries.len() >= inner.capacity && !inner.entries.contains_key(&key) {
-            inner.evict_lru();
-        }
-
-        inner.put_entry(
+        let inserted_new = inner.put_entry(
             key,
             CacheEntry {
                 mapping,
@@ -1672,6 +1667,14 @@ impl ExtentCache {
                 last_access: AtomicU64::new(access_clock),
             },
         );
+
+        // Inserting first avoids a separate `contains_key` tree descent.  The
+        // new row is protected while selecting the victim so this evicts the
+        // exact same pre-existing LRU row (including the key tie-break) as the
+        // former evict-before-insert order.
+        if inserted_new && inner.entries.len() > inner.capacity {
+            inner.evict_lru_except(key);
+        }
     }
 
     /// Invalidate all cached entries in the given namespace whose range overlaps
@@ -1756,8 +1759,8 @@ impl ExtentCache {
 
 impl ExtentCacheInner {
     /// Insert or overwrite an entry.
-    fn put_entry(&mut self, key: (u64, u32), entry: CacheEntry) {
-        self.entries.insert(key, entry);
+    fn put_entry(&mut self, key: (u64, u32), entry: CacheEntry) -> bool {
+        self.entries.insert(key, entry).is_none()
     }
 
     /// Remove an entry, if present.
@@ -1768,10 +1771,11 @@ impl ExtentCacheInner {
     /// Evict the unique LRU victim: oldest `last_access`, then smallest key.
     /// This runs only on insert-at-capacity, keeping the hot hit path read-only
     /// apart from atomics.
-    fn evict_lru(&mut self) {
+    fn evict_lru_except(&mut self, protected_key: (u64, u32)) {
         let Some(key) = self
             .entries
             .iter()
+            .filter(|&(&key, _)| key != protected_key)
             .min_by_key(|&(&key, entry)| (entry.last_access.load(Ordering::Relaxed), key))
             .map(|(&key, _)| key)
         else {

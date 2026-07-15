@@ -26,6 +26,8 @@ use std::hint::black_box;
 
 const ENTRIES: u32 = 256;
 const OPS: usize = 2_000_000;
+const INSERT_ENTRIES: u32 = 64;
+const INSERT_OPS: usize = 4096;
 
 fn mapping_for(lb: u32) -> u64 {
     u64::from(lb).wrapping_mul(1_000)
@@ -113,6 +115,54 @@ fn run_field(cache: &mut Field) -> u64 {
     acc
 }
 
+fn seed_insert_map() -> BTreeMap<u32, u64> {
+    (0..INSERT_ENTRIES)
+        .map(|key| (key, u64::from(key)))
+        .collect()
+}
+
+fn evict_lru(entries: &mut BTreeMap<u32, u64>, protected_key: Option<u32>) {
+    let victim = entries
+        .iter()
+        .filter(|&(&key, _)| Some(key) != protected_key)
+        .min_by_key(|&(&key, &last_access)| (last_access, key))
+        .map(|(&key, _)| key)
+        .expect("full cache has an eviction candidate");
+    entries.remove(&victim);
+}
+
+fn insert_control(entries: &mut BTreeMap<u32, u64>, key: u32, last_access: u64) {
+    if entries.len() >= INSERT_ENTRIES as usize && !entries.contains_key(&key) {
+        evict_lru(entries, None);
+    }
+    entries.insert(key, last_access);
+}
+
+fn insert_once(entries: &mut BTreeMap<u32, u64>, key: u32, last_access: u64) {
+    let inserted_new = entries.insert(key, last_access).is_none();
+    if inserted_new && entries.len() > INSERT_ENTRIES as usize {
+        evict_lru(entries, Some(key));
+    }
+}
+
+fn run_insert_workload(
+    entries: &mut BTreeMap<u32, u64>,
+    insert: fn(&mut BTreeMap<u32, u64>, u32, u64),
+) -> u64 {
+    for op in 0..INSERT_OPS {
+        // One miss followed by three updates of the same newly-cached extent.
+        let key = INSERT_ENTRIES + u32::try_from(op / 4).expect("bounded operation count");
+        insert(
+            entries,
+            key,
+            u64::try_from(INSERT_ENTRIES as usize + op).expect("bounded operation count"),
+        );
+    }
+    entries.iter().fold(0_u64, |acc, (&key, &last_access)| {
+        acc.wrapping_add(u64::from(key).rotate_left(17) ^ last_access)
+    })
+}
+
 fn bench_cache(c: &mut Criterion) {
     assert_eq!(
         run_indexed(&mut Indexed::seed()),
@@ -132,6 +182,39 @@ fn bench_cache(c: &mut Criterion) {
         b.iter_batched(
             Field::seed,
             |mut cache| black_box(run_field(black_box(&mut cache))),
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+
+    assert_eq!(
+        run_insert_workload(&mut seed_insert_map(), insert_control),
+        run_insert_workload(&mut seed_insert_map(), insert_once),
+        "insert-once cache state diverged from the control"
+    );
+
+    let mut group = c.benchmark_group("extent_cache_insert_full");
+    group.bench_function("contains_then_insert_control", |b| {
+        b.iter_batched(
+            seed_insert_map,
+            |mut entries| {
+                black_box(run_insert_workload(
+                    black_box(&mut entries),
+                    insert_control,
+                ))
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.bench_function("insert_once_candidate", |b| {
+        b.iter_batched(
+            seed_insert_map,
+            |mut entries| {
+                black_box(run_insert_workload(
+                    black_box(&mut entries),
+                    insert_once,
+                ))
+            },
             criterion::BatchSize::SmallInput,
         );
     });
