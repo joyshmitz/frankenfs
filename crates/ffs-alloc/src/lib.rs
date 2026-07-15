@@ -312,22 +312,9 @@ pub fn bitmap_clear(bitmap: &mut [u8], idx: u32) {
     }
 }
 
-fn bitmap_clear_with_set_undo(bitmap: &mut [u8], idx: u32, undo_set: &mut Vec<u32>) {
-    if bitmap_get(bitmap, idx) {
-        bitmap_clear(bitmap, idx);
-        undo_set.push(idx);
-    }
-}
-
 fn rollback_set_mutations(bitmap: &mut [u8], undo_clear: &[u32]) {
     for &idx in undo_clear.iter().rev() {
         bitmap_clear(bitmap, idx);
-    }
-}
-
-fn rollback_clear_mutations(bitmap: &mut [u8], undo_set: &[u32]) {
-    for &idx in undo_set.iter().rev() {
-        bitmap_set(bitmap, idx);
     }
 }
 
@@ -3642,7 +3629,6 @@ pub fn free_inode_persist(
     let bitmap_block = groups[gidx].inode_bitmap_block;
     let bitmap_buf = dev.read_block(cx, bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
-    let mut rollback_set_bits = Vec::with_capacity(1);
     let previous_free_inodes = groups[gidx].free_inodes;
     let previous_inode_search_start = groups[gidx].inode_search_start;
     let group = GroupNumber(group_idx);
@@ -3676,7 +3662,10 @@ pub fn free_inode_persist(
         });
     }
 
-    bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
+    // The validation above proves this one bit is set. The bit index itself is
+    // therefore the complete rollback record; a heap-backed one-element undo
+    // vector carried no additional state.
+    bitmap_clear(&mut bitmap, bit_idx);
     let inode_bitmap_override =
         BitmapOverride::from_flipped_bit_range(&bitmap, bit_idx, 1, pctx.inodes_per_group);
     dev.write_block(cx, bitmap_block, &bitmap)?;
@@ -3701,7 +3690,7 @@ pub fn free_inode_persist(
         groups[gidx].free_inodes = previous_free_inodes;
         groups[gidx].used_dirs = previous_used_dirs;
         groups[gidx].inode_search_start = previous_inode_search_start;
-        rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
+        bitmap_set(&mut bitmap, bit_idx);
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
@@ -3724,9 +3713,9 @@ pub fn free_inode_persist(
 /// The bd-bhh0i sharded create-rollback composes this under the owning group's
 /// `Mutex` (the inode was allocated lock-free via the sharded allocator, so the
 /// single-lock `free_inode_persist` over `&mut [GroupStats]` would free it against
-/// the wrong structure). `free_inode_persist` is left UNTOUCHED (single-lock
-/// byte-identical); the `free_inode_in_group_matches_free_inode_persist` differential
-/// test locks this replica to it byte-for-byte.
+/// the wrong structure). Changes remain mirrored with `free_inode_persist`; the
+/// `free_inode_in_group_matches_free_inode_persist` differential test locks this
+/// replica to it byte-for-byte.
 #[expect(clippy::too_many_arguments)]
 pub fn free_inode_in_group(
     cx: &Cx,
@@ -3759,7 +3748,6 @@ pub fn free_inode_in_group(
     let bitmap_block = stats.inode_bitmap_block;
     let bitmap_buf = dev.read_block(cx, bitmap_block)?;
     let mut bitmap = bitmap_buf.as_slice().to_vec();
-    let mut rollback_set_bits = Vec::with_capacity(1);
     let previous_free_inodes = stats.free_inodes;
     let previous_inode_search_start = stats.inode_search_start;
     let bit_idx = u32::try_from(ino_zero % u64::from(geo.inodes_per_group)).map_err(|_| {
@@ -3789,7 +3777,9 @@ pub fn free_inode_in_group(
         });
     }
 
-    bitmap_clear_with_set_undo(&mut bitmap, bit_idx, &mut rollback_set_bits);
+    // The validation above proves this one bit is set, so `bit_idx` itself is
+    // the complete rollback record.
+    bitmap_clear(&mut bitmap, bit_idx);
     let inode_bitmap_override =
         BitmapOverride::from_flipped_bit_range(&bitmap, bit_idx, 1, pctx.inodes_per_group);
     dev.write_block(cx, bitmap_block, &bitmap)?;
@@ -3812,7 +3802,7 @@ pub fn free_inode_in_group(
         stats.free_inodes = previous_free_inodes;
         stats.used_dirs = previous_used_dirs;
         stats.inode_search_start = previous_inode_search_start;
-        rollback_clear_mutations(&mut bitmap, &rollback_set_bits);
+        bitmap_set(&mut bitmap, bit_idx);
         restore_bitmap_after_group_desc_error(
             cx,
             dev,
