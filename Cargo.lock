@@ -886,6 +886,7 @@ dependencies = [
  "ffs-ondisk",
  "ffs-types",
  "proptest",
+ "smallvec",
 ]
 
 [[package]]
