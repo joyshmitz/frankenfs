@@ -507,16 +507,13 @@ where
     // before it; no earlier child can overlap the requested range.
     let first = first_index_for_range(indexes, start);
     let mut count = 0;
-    for (offset, idx) in indexes[first..].iter().enumerate() {
-        let pos = first + offset;
+    for idx in &indexes[first..] {
         let child_start = u64::from(idx.logical_block);
-        let child_end = indexes
-            .get(pos + 1)
-            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
-
-        if child_end <= start {
-            continue;
-        }
+        // `first_index_for_range` selected the last separator at or before
+        // `start`. Since parsed separators are strictly increasing, the next
+        // separator after every child visited from there is necessarily past
+        // `start` (and the final implicit separator is 2^32). Recomputing that
+        // upper bound cannot reject a child.
         if child_start >= end {
             break;
         }

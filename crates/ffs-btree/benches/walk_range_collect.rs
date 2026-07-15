@@ -179,6 +179,144 @@ fn collect_tail_walk_range(cx: &Cx, dev: &dyn BlockDevice, root: &[u8; 60], cut:
     out
 }
 
+#[derive(Clone, Copy)]
+struct IndexProbe {
+    logical_block: u32,
+    leaf_block: u64,
+}
+
+fn first_index_probe_for_range(indexes: &[IndexProbe], start: u64) -> usize {
+    indexes
+        .partition_point(|idx| u64::from(idx.logical_block) <= start)
+        .saturating_sub(1)
+}
+
+fn select_index_window_control(indexes: &[IndexProbe], start: u64, end: u64) -> Vec<u64> {
+    let first = first_index_probe_for_range(indexes, start);
+    let mut out = Vec::new();
+    for (offset, idx) in indexes[first..].iter().enumerate() {
+        let pos = first + offset;
+        let child_start = u64::from(idx.logical_block);
+        let child_end = indexes
+            .get(pos + 1)
+            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+        out.push(idx.leaf_block);
+    }
+    out
+}
+
+fn select_index_window_candidate(indexes: &[IndexProbe], start: u64, end: u64) -> Vec<u64> {
+    let first = first_index_probe_for_range(indexes, start);
+    let mut out = Vec::new();
+    for idx in &indexes[first..] {
+        if u64::from(idx.logical_block) >= end {
+            break;
+        }
+        out.push(idx.leaf_block);
+    }
+    out
+}
+
+#[inline(never)]
+fn scan_index_window_control(indexes: &[IndexProbe], start: u64, end: u64) -> u64 {
+    let first = first_index_probe_for_range(indexes, start);
+    let mut digest = 0xCBF2_9CE4_8422_2325_u64;
+    let mut visited = 0_u64;
+    for (offset, idx) in indexes[first..].iter().enumerate() {
+        let pos = first + offset;
+        let child_start = u64::from(idx.logical_block);
+        let child_end = indexes
+            .get(pos + 1)
+            .map_or(1_u64 << 32, |next| u64::from(next.logical_block));
+        if child_end <= start {
+            continue;
+        }
+        if child_start >= end {
+            break;
+        }
+        digest = digest.rotate_left(7) ^ idx.leaf_block.wrapping_mul(0x9E37_79B1_85EB_CA87);
+        visited += 1;
+    }
+    digest ^ visited
+}
+
+#[inline(never)]
+fn scan_index_window_candidate(indexes: &[IndexProbe], start: u64, end: u64) -> u64 {
+    let first = first_index_probe_for_range(indexes, start);
+    let mut digest = 0xCBF2_9CE4_8422_2325_u64;
+    let mut visited = 0_u64;
+    for idx in &indexes[first..] {
+        if u64::from(idx.logical_block) >= end {
+            break;
+        }
+        digest = digest.rotate_left(7) ^ idx.leaf_block.wrapping_mul(0x9E37_79B1_85EB_CA87);
+        visited += 1;
+    }
+    digest ^ visited
+}
+
+fn bench_index_guard(c: &mut Criterion) {
+    let indexes: Vec<_> = (0_u32..340)
+        .map(|i| IndexProbe {
+            logical_block: i * 16,
+            leaf_block: 100_000 + u64::from(i),
+        })
+        .collect();
+    let start = u64::from(indexes[37].logical_block) + 7;
+    let end = u64::from(indexes[303].logical_block);
+
+    for &(proof_start, proof_end) in &[
+        (0, 1),
+        (start, end),
+        (u64::from(indexes[339].logical_block), 1_u64 << 32),
+    ] {
+        assert_eq!(
+            select_index_window_control(&indexes, proof_start, proof_end),
+            select_index_window_candidate(&indexes, proof_start, proof_end),
+        );
+        assert_eq!(
+            scan_index_window_control(&indexes, proof_start, proof_end),
+            scan_index_window_candidate(&indexes, proof_start, proof_end),
+        );
+    }
+
+    let mut group = c.benchmark_group("extent_walk_index_start_guard_340");
+    group.bench_function("next_separator_control_a", |b| {
+        b.iter(|| {
+            black_box(scan_index_window_control(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("next_separator_control_b", |b| {
+        b.iter(|| {
+            black_box(scan_index_window_control(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.bench_function("partition_proven_candidate", |b| {
+        b.iter(|| {
+            black_box(scan_index_window_candidate(
+                black_box(&indexes),
+                black_box(start),
+                black_box(end),
+            ))
+        });
+    });
+    group.finish();
+}
+
 fn bench_tail(c: &mut Criterion) {
     let cx = Cx::for_testing();
     for &n in &[2000_u32, 8000] {
@@ -232,5 +370,5 @@ fn bench_collect(c: &mut Criterion) {
     }
 }
 
-criterion_group!(benches, bench_collect, bench_tail);
+criterion_group!(benches, bench_collect, bench_tail, bench_index_guard);
 criterion_main!(benches);
