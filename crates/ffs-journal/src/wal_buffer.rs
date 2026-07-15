@@ -979,9 +979,12 @@ impl<W: WalWriter> GroupCommitCoordinator<W> {
         entries: Vec<WalEntry>,
         epoch: u64,
     ) -> Result<(GroupCommitResult, Vec<WalEntry>), FfsError> {
-        // Partition: entries for this epoch vs future.
-        let (to_flush, remaining): (Vec<WalEntry>, Vec<WalEntry>) =
-            entries.into_iter().partition(|e| e.epoch <= epoch);
+        // Retain the input allocation for the common, dominant flush set and
+        // move only future entries into the returned tail.
+        let mut to_flush = entries;
+        let remaining = to_flush
+            .extract_if(.., |entry| entry.epoch > epoch)
+            .collect();
 
         if to_flush.is_empty() {
             // Nothing to flush — still mark the epoch as durable (it's vacuously true).

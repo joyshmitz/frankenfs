@@ -21,7 +21,9 @@
 //!   CARGO_TARGET_DIR=/data/projects/frankenfs/.rch-targets/blackthrush-dig5 \
 //!   rch exec -- cargo bench --profile release-perf -p ffs-journal --bench descriptor_decode
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
+use ffs_journal::wal_buffer::{WalEntry, WalEntryType};
+use ffs_types::{BlockNumber, CommitSeq, TxnId};
 use std::hint::black_box;
 
 const JBD2_MAGIC: u32 = 0xC03B_3998;
@@ -34,6 +36,43 @@ const FLAG_SAME_UUID: u16 = 0x0002;
 const FLAG_LAST: u16 = 0x0008;
 const N_TAGS: usize = 32;
 const N_REVOKES: usize = 1020;
+
+fn partition_allocating(entries: Vec<WalEntry>, epoch: u64) -> (Vec<WalEntry>, Vec<WalEntry>) {
+    entries.into_iter().partition(|entry| entry.epoch <= epoch)
+}
+
+fn partition_extract_future(
+    mut entries: Vec<WalEntry>,
+    epoch: u64,
+) -> (Vec<WalEntry>, Vec<WalEntry>) {
+    let remaining = entries
+        .extract_if(.., |entry| entry.epoch > epoch)
+        .collect();
+    (entries, remaining)
+}
+
+fn group_commit_entries(unsorted: bool) -> Vec<WalEntry> {
+    (0_u64..1024)
+        .map(|index| {
+            let rank = if unsorted {
+                index.wrapping_mul(73) % 1024
+            } else {
+                index
+            };
+            let epoch = if rank < 896 { 1 } else { 2 };
+            WalEntry {
+                epoch,
+                txn_id: TxnId(index + 1),
+                commit_seq: CommitSeq(index + 11),
+                entry_type: WalEntryType::Write {
+                    block: BlockNumber(index + 101),
+                    data: vec![index as u8; 32],
+                },
+                crc32c: index as u32 ^ 0xA5A5_5A5A,
+            }
+        })
+        .collect()
+}
 
 /// Build a Legacy JBD2 descriptor block with `n` SAME_UUID tags (8-byte
 /// records), the last one LAST-terminated — the shape replay decodes.
@@ -76,6 +115,40 @@ fn build_revoke(n: usize) -> Vec<u8> {
 }
 
 fn bench(c: &mut Criterion) {
+    let group_commit = group_commit_entries(false);
+    let unsorted_group_commit = group_commit_entries(true);
+    assert_eq!(
+        partition_extract_future(group_commit.clone(), 1),
+        partition_allocating(group_commit.clone(), 1),
+        "in-place partition must preserve sorted output order"
+    );
+    assert_eq!(
+        partition_extract_future(unsorted_group_commit.clone(), 1),
+        partition_allocating(unsorted_group_commit, 1),
+        "in-place partition must preserve both unsorted output orders"
+    );
+
+    {
+        let mut g = c.benchmark_group("group_commit_partition_1024");
+        for control in ["allocating_partition_a", "allocating_partition_b"] {
+            g.bench_function(control, |b| {
+                b.iter_batched(
+                    || group_commit.clone(),
+                    |entries| black_box(partition_allocating(entries, 1)),
+                    BatchSize::SmallInput,
+                );
+            });
+        }
+        g.bench_function("extract_future_in_place", |b| {
+            b.iter_batched(
+                || group_commit.clone(),
+                |entries| black_box(partition_extract_future(entries, 1)),
+                BatchSize::SmallInput,
+            );
+        });
+        g.finish();
+    }
+
     let block = build_descriptor(N_TAGS);
     // format=0 (Legacy), is_64bit=false, has_tail=false.
     let two = ffs_journal::bench_descriptor_decode(&block, false, false, 0, false);
