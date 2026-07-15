@@ -5738,8 +5738,8 @@ mod tests {
     /// descriptor) AND in-memory (free_inodes, used_dirs, inode_search_start) state
     /// to the single-lock [`free_inode_persist`] for an inode in one group — across
     /// csum/non-csum filesystems and file/dir inodes (the dir case exercises the
-    /// used_dirs decrement). Lets `free_inode_persist` stay UNTOUCHED while the
-    /// sharded create-rollback composes the replica under a per-group lock.
+    /// used_dirs decrement). This keeps both implementations behavior-locked while
+    /// sharded create rollback composes the replica under a per-group lock.
     #[test]
     fn free_inode_in_group_matches_free_inode_persist() {
         set_gdt_persistence_deferred_for_test(Some(false));
