@@ -21,6 +21,7 @@
 //! this). The aggregate fold is asserted identical first.
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::hint::black_box;
 
@@ -28,6 +29,7 @@ const ENTRIES: u32 = 256;
 const OPS: usize = 2_000_000;
 const INSERT_ENTRIES: u32 = 64;
 const INSERT_OPS: usize = 4096;
+const INVALIDATE_ENTRIES: u32 = 64;
 
 fn mapping_for(lb: u32) -> u64 {
     u64::from(lb).wrapping_mul(1_000)
@@ -163,6 +165,67 @@ fn run_insert_workload(
     })
 }
 
+type InvalidateMap = BTreeMap<(u64, u32), (u32, u32)>;
+
+fn seed_invalidate_map() -> InvalidateMap {
+    (0..INVALIDATE_ENTRIES)
+        .map(|index| {
+            let logical_start = index * 10;
+            ((0, logical_start), (logical_start, 10))
+        })
+        .collect()
+}
+
+fn overlaps_invalidation(
+    logical_start: u32,
+    count: u32,
+    invalidate_start: u32,
+    invalidate_end: u64,
+) -> bool {
+    let extent_start = u64::from(logical_start);
+    let extent_end = extent_start + u64::from(count);
+    extent_start < invalidate_end && extent_end > u64::from(invalidate_start)
+}
+
+fn invalidate_vec_control(entries: &mut InvalidateMap) {
+    let invalidate_start = 200;
+    let invalidate_end = 230;
+    let keys: Vec<(u64, u32)> = entries
+        .range((0, 0)..=(0, 230))
+        .filter(|&(_, &(logical_start, count))| {
+            overlaps_invalidation(logical_start, count, invalidate_start, invalidate_end)
+        })
+        .map(|(&key, _)| key)
+        .collect();
+    for key in keys {
+        entries.remove(&key);
+    }
+}
+
+fn invalidate_smallvec_candidate(entries: &mut InvalidateMap) {
+    let invalidate_start = 200;
+    let invalidate_end = 230;
+    let keys: SmallVec<[(u64, u32); 4]> = entries
+        .range((0, 0)..=(0, 230))
+        .filter(|&(_, &(logical_start, count))| {
+            overlaps_invalidation(logical_start, count, invalidate_start, invalidate_end)
+        })
+        .map(|(&key, _)| key)
+        .collect();
+    for key in keys {
+        entries.remove(&key);
+    }
+}
+
+fn invalidate_digest(entries: &InvalidateMap) -> u64 {
+    entries.iter().fold(0_u64, |digest, (&key, &mapping)| {
+        digest
+            .rotate_left(7)
+            .wrapping_add(key.0 ^ u64::from(key.1))
+            .wrapping_add(u64::from(mapping.0).rotate_left(mapping.1))
+    })
+}
+
 fn bench_cache(c: &mut Criterion) {
     assert_eq!(
         run_indexed(&mut Indexed::seed()),
@@ -214,6 +277,40 @@ fn bench_cache(c: &mut Criterion) {
                     black_box(&mut entries),
                     insert_once,
                 ))
+            },
+            criterion::BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+
+    let mut control = seed_invalidate_map();
+    let mut candidate = control.clone();
+    invalidate_vec_control(&mut control);
+    invalidate_smallvec_candidate(&mut candidate);
+    assert_eq!(
+        control, candidate,
+        "inline invalidation keys changed the final cache map"
+    );
+
+    let mut group = c.benchmark_group("extent_cache_invalidate_inline_keys");
+    for control_name in ["vec_control_a", "vec_control_b"] {
+        group.bench_function(control_name, |b| {
+            b.iter_batched(
+                seed_invalidate_map,
+                |mut entries| {
+                    invalidate_vec_control(black_box(&mut entries));
+                    black_box(invalidate_digest(&entries))
+                },
+                criterion::BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("smallvec_candidate", |b| {
+        b.iter_batched(
+            seed_invalidate_map,
+            |mut entries| {
+                invalidate_smallvec_candidate(black_box(&mut entries));
+                black_box(invalidate_digest(&entries))
             },
             criterion::BatchSize::SmallInput,
         );

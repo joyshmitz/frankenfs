@@ -24,6 +24,7 @@ use ffs_error::{FfsError, Result};
 use ffs_ondisk::{EXT_INIT_MAX_LEN, Ext4Extent, Ext4ExtentHeader, ExtentTree, parse_extent_tree};
 use ffs_types::BlockNumber;
 use parking_lot::RwLock;
+use smallvec::SmallVec;
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -1688,7 +1689,7 @@ impl ExtentCache {
         let mut inner = self.shard(ns).write();
 
         // Collect keys to remove: entries in this namespace whose extent overlaps the range.
-        let to_remove: Vec<(u64, u32)> = inner
+        let to_remove: SmallVec<[(u64, u32); 4]> = inner
             .entries
             .range((ns, 0)..=(ns, range_end_u32))
             .filter(|&(&(entry_ns, _), e)| {
