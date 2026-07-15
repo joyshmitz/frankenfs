@@ -1060,6 +1060,7 @@ dependencies = [
  "ffs-types",
  "parking_lot",
  "proptest",
+ "smallvec",
 ]
 
 [[package]]
