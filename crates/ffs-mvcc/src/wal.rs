@@ -179,52 +179,43 @@ pub fn encode_commit(commit: &WalCommit) -> Result<Vec<u8>> {
         .checked_add(body_size)
         .ok_or_else(|| FfsError::Format("commit record total size overflow".to_owned()))?;
 
-    let mut buf = vec![0_u8; total_size];
-    let mut offset = 0_usize;
+    let mut buf = Vec::with_capacity(total_size);
 
     // Record length (excludes the length field itself)
     let record_len = u32::try_from(body_size)
         .map_err(|_| FfsError::Format("commit record length exceeds u32".to_owned()))?;
-    buf[offset..offset + 4].copy_from_slice(&record_len.to_le_bytes());
-    offset += 4;
+    buf.extend_from_slice(&record_len.to_le_bytes());
 
     // Record type
-    buf[offset] = RECORD_TYPE_COMMIT;
-    offset += 1;
+    buf.push(RECORD_TYPE_COMMIT);
 
     // Commit sequence
-    buf[offset..offset + 8].copy_from_slice(&commit.commit_seq.0.to_le_bytes());
-    offset += 8;
+    buf.extend_from_slice(&commit.commit_seq.0.to_le_bytes());
 
     // Transaction ID
-    buf[offset..offset + 8].copy_from_slice(&commit.txn_id.0.to_le_bytes());
-    offset += 8;
+    buf.extend_from_slice(&commit.txn_id.0.to_le_bytes());
 
     // Number of writes
     let num_writes = u32::try_from(commit.writes.len())
         .map_err(|_| FfsError::Format("too many writes in commit".to_owned()))?;
-    buf[offset..offset + 4].copy_from_slice(&num_writes.to_le_bytes());
-    offset += 4;
+    buf.extend_from_slice(&num_writes.to_le_bytes());
 
     // Each write
     for write in &commit.writes {
-        buf[offset..offset + 8].copy_from_slice(&write.block.0.to_le_bytes());
-        offset += 8;
+        buf.extend_from_slice(&write.block.0.to_le_bytes());
 
         let data_len = u32::try_from(write.data.len())
             .map_err(|_| FfsError::Format("write data length exceeds u32".to_owned()))?;
-        buf[offset..offset + 4].copy_from_slice(&data_len.to_le_bytes());
-        offset += 4;
+        buf.extend_from_slice(&data_len.to_le_bytes());
 
-        buf[offset..offset + write.data.len()].copy_from_slice(&write.data);
-        offset += write.data.len();
+        buf.extend_from_slice(&write.data);
     }
 
     // Compute CRC over the body (everything after record_len, before crc)
     let crc_start = 4_usize; // after record_len
-    let crc_end = offset; // before crc
-    let crc = crc32c::crc32c(&buf[crc_start..crc_end]);
-    buf[offset..offset + 4].copy_from_slice(&crc.to_le_bytes());
+    let crc = crc32c::crc32c(&buf[crc_start..]);
+    buf.extend_from_slice(&crc.to_le_bytes());
+    debug_assert_eq!(buf.len(), total_size);
 
     Ok(buf)
 }

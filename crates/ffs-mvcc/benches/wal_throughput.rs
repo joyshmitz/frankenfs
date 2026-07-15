@@ -18,6 +18,7 @@ use asupersync::Cx;
 use criterion::{BenchmarkId, Criterion, criterion_group};
 use ffs_mvcc::compression::VersionData;
 use ffs_mvcc::persist::{PersistOptions, PersistentMvccStore};
+use ffs_mvcc::wal::{self, RECORD_TYPE_COMMIT, WalCommit, WalWrite};
 use ffs_mvcc::{
     BlockVersion, CompressionAlgo, CompressionPolicy, ConflictPolicy, MergeProof, MvccStore,
 };
@@ -588,6 +589,78 @@ fn bench_wal_commit_throughput(c: &mut Criterion) {
             block_id += 4;
         });
     });
+}
+
+fn encode_commit_zeroed_control(commit: &WalCommit) -> Vec<u8> {
+    let data_size = commit
+        .writes
+        .iter()
+        .map(|write| 8 + 4 + write.data.len())
+        .sum::<usize>();
+    let body_size = 1 + 8 + 8 + 4 + data_size + 4;
+    let total_size = 4 + body_size;
+    let mut buf = vec![0_u8; total_size];
+    let mut offset = 0_usize;
+
+    let record_len = u32::try_from(body_size).expect("fixture record length fits u32");
+    buf[offset..offset + 4].copy_from_slice(&record_len.to_le_bytes());
+    offset += 4;
+    buf[offset] = RECORD_TYPE_COMMIT;
+    offset += 1;
+    buf[offset..offset + 8].copy_from_slice(&commit.commit_seq.0.to_le_bytes());
+    offset += 8;
+    buf[offset..offset + 8].copy_from_slice(&commit.txn_id.0.to_le_bytes());
+    offset += 8;
+    let num_writes = u32::try_from(commit.writes.len()).expect("fixture write count fits u32");
+    buf[offset..offset + 4].copy_from_slice(&num_writes.to_le_bytes());
+    offset += 4;
+
+    for write in &commit.writes {
+        buf[offset..offset + 8].copy_from_slice(&write.block.0.to_le_bytes());
+        offset += 8;
+        let data_len = u32::try_from(write.data.len()).expect("fixture write length fits u32");
+        buf[offset..offset + 4].copy_from_slice(&data_len.to_le_bytes());
+        offset += 4;
+        buf[offset..offset + write.data.len()].copy_from_slice(&write.data);
+        offset += write.data.len();
+    }
+
+    let crc = crc32c::crc32c(&buf[4..offset]);
+    buf[offset..offset + 4].copy_from_slice(&crc.to_le_bytes());
+    buf
+}
+
+fn bench_wal_encode_zero_fill_elision_ab(c: &mut Criterion) {
+    let commit = WalCommit {
+        commit_seq: CommitSeq(0x1020_3040_5060_7080),
+        txn_id: TxnId(0x8877_6655_4433_2211),
+        writes: (0_u64..32)
+            .map(|index| WalWrite {
+                block: BlockNumber(0x1000 + index),
+                data: vec![index as u8; 4096],
+            })
+            .collect(),
+    };
+
+    let frozen = encode_commit_zeroed_control(&commit);
+    let appended = wal::encode_commit(&commit).expect("encode fixture");
+    assert_eq!(
+        appended, frozen,
+        "sequential encoder must be byte-identical"
+    );
+
+    let mut group = c.benchmark_group("wal_encode_zero_fill_elision_32x4k");
+    for control in ["zeroed_offsets_a", "zeroed_offsets_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| black_box(encode_commit_zeroed_control(black_box(&commit))));
+        });
+    }
+    group.bench_function("exact_capacity_append", |b| {
+        b.iter(|| {
+            black_box(wal::encode_commit(black_box(&commit)).expect("encode benchmark fixture"))
+        });
+    });
+    group.finish();
 }
 
 /// Isolate the WAL append syscall primitive: the former seek+write pair versus
@@ -2615,6 +2688,7 @@ criterion_group!(
     wal_benches,
     bench_read_visible_deep_chain,
     bench_wal_commit_throughput,
+    bench_wal_encode_zero_fill_elision_ab,
     bench_wal_positioned_append,
     bench_ssi_overhead,
     bench_ebr_memory_report,
