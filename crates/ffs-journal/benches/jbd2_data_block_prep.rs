@@ -11,9 +11,11 @@
 //! redundant zero-init is a real saving. Both produce byte-identical buffers.
 
 use criterion::{Criterion, criterion_group, criterion_main};
+use std::borrow::Cow;
 use std::hint::black_box;
 
 const BS: usize = 4096;
+const JBD2_MAGIC: u32 = 0xC03B_3998;
 /// One descriptor group's worth of data blocks, so per-iteration harness
 /// overhead is amortized across a realistic commit chunk.
 const BLOCKS: usize = 256;
@@ -37,6 +39,58 @@ fn prep_skip_zero_init(payload: &[u8]) -> Vec<u8> {
         p[..copy_len].copy_from_slice(&payload[..copy_len]);
         p
     }
+}
+
+/// Frozen production shape after zero-fill elision: every full payload still
+/// becomes a temporary owned block before `write_block(&[u8])` consumes it.
+fn prep_owned_payload(payload: &[u8]) -> Cow<'_, [u8]> {
+    let copy_len = payload.len().min(BS);
+    let escaped = payload.len() >= 4 && payload[0..4] == JBD2_MAGIC.to_be_bytes();
+    let mut padded = if copy_len == BS {
+        payload[..BS].to_vec()
+    } else {
+        let mut p = vec![0_u8; BS];
+        p[..copy_len].copy_from_slice(&payload[..copy_len]);
+        p
+    };
+    if escaped {
+        padded[0..4].copy_from_slice(&[0_u8; 4]);
+    }
+    Cow::Owned(padded)
+}
+
+/// Candidate production shape: borrow an exact full block unless JBD2 escape
+/// mutation or short-payload zero padding requires ownership.
+fn prep_borrow_exact_payload(payload: &[u8]) -> Cow<'_, [u8]> {
+    let copy_len = payload.len().min(BS);
+    let escaped = payload.len() >= 4 && payload[0..4] == JBD2_MAGIC.to_be_bytes();
+    if copy_len == BS && !escaped {
+        Cow::Borrowed(&payload[..BS])
+    } else {
+        let mut padded = if copy_len == BS {
+            payload[..BS].to_vec()
+        } else {
+            let mut p = vec![0_u8; BS];
+            p[..copy_len].copy_from_slice(&payload[..copy_len]);
+            p
+        };
+        if escaped {
+            padded[0..4].copy_from_slice(&[0_u8; 4]);
+        }
+        Cow::Owned(padded)
+    }
+}
+
+fn prep_payload_chunk(payload: &[u8], prep: for<'a> fn(&'a [u8]) -> Cow<'a, [u8]>) -> u64 {
+    let mut acc = 0_u64;
+    for _ in 0..BLOCKS {
+        let padded = prep(black_box(payload));
+        acc = acc
+            .wrapping_add(u64::from(padded[0]))
+            .wrapping_add(u64::from(padded[BS - 1]));
+        black_box(padded);
+    }
+    acc
 }
 
 fn prep_chunk<F: Fn(&[u8]) -> Vec<u8>>(payload: &[u8], prep: F) -> u64 {
@@ -77,6 +131,39 @@ fn bench_jbd2_data_block_prep(c: &mut Criterion) {
     });
     group.bench_function("skip_zero_init", |b| {
         b.iter(|| black_box(prep_chunk(black_box(&full), prep_skip_zero_init)));
+    });
+    group.finish();
+
+    let mut escaped = full.clone();
+    escaped[0..4].copy_from_slice(&JBD2_MAGIC.to_be_bytes());
+    for payload in [&full[..], &short[..], &escaped[..]] {
+        assert_eq!(
+            prep_owned_payload(payload).as_ref(),
+            prep_borrow_exact_payload(payload).as_ref(),
+            "payload preparation bytes diverged"
+        );
+    }
+    let borrowed = prep_borrow_exact_payload(&full);
+    assert!(matches!(borrowed, Cow::Borrowed(_)));
+    assert_eq!(borrowed.as_ptr(), full.as_ptr());
+    assert!(matches!(prep_borrow_exact_payload(&short), Cow::Owned(_)));
+    assert!(matches!(prep_borrow_exact_payload(&escaped), Cow::Owned(_)));
+
+    let mut group = c.benchmark_group("jbd2_full_block_payload_ownership_256x4096");
+    group.sample_size(10);
+    group.bench_function("owned_copy_a", |b| {
+        b.iter(|| black_box(prep_payload_chunk(black_box(&full), prep_owned_payload)));
+    });
+    group.bench_function("owned_copy_b", |b| {
+        b.iter(|| black_box(prep_payload_chunk(black_box(&full), prep_owned_payload)));
+    });
+    group.bench_function("borrow_exact_full_block", |b| {
+        b.iter(|| {
+            black_box(prep_payload_chunk(
+                black_box(&full),
+                prep_borrow_exact_payload,
+            ))
+        });
     });
     group.finish();
 }

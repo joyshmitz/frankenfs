@@ -12,6 +12,7 @@ use asupersync::Cx;
 use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_types::{BlockNumber, CommitSeq};
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 
 const JBD2_MAGIC: u32 = 0xC03B_3998;
@@ -1318,7 +1319,7 @@ impl Jbd2Writer {
         while item_idx < txn.body_items.len() {
             match &txn.body_items[item_idx] {
                 Jbd2TxnBodyItem::Write(..) => {
-                    let mut chunk: Vec<(BlockNumber, bool, Vec<u8>)> = Vec::new();
+                    let mut chunk: Vec<(BlockNumber, bool, Cow<'_, [u8]>)> = Vec::new();
                     while item_idx < txn.body_items.len() && chunk.len() < tags_per_desc {
                         match &txn.body_items[item_idx] {
                             Jbd2TxnBodyItem::Write(target, payload) => {
@@ -1331,21 +1332,26 @@ impl Jbd2Writer {
                                 // bytes a second time per block.
                                 let escaped =
                                     payload.len() >= 4 && payload[0..4] == JBD2_MAGIC.to_be_bytes();
-                                // A full-block payload overwrites every byte, so
-                                // the zero-init would be pure waste — copy it
-                                // directly. Only short payloads need the block
-                                // zero-padded to `bs`.
-                                let mut padded = if copy_len == bs {
-                                    payload[..bs].to_vec()
+                                // Full, non-escaped payloads already have the
+                                // exact bytes and lifetime needed by the device
+                                // write, so borrow them through this descriptor
+                                // chunk. Escaped or short payloads still need an
+                                // owned mutable/padded buffer.
+                                let padded = if copy_len == bs && !escaped {
+                                    Cow::Borrowed(&payload[..bs])
                                 } else {
-                                    let mut p = vec![0_u8; bs];
-                                    p[..copy_len].copy_from_slice(&payload[..copy_len]);
-                                    p
+                                    let mut p = if copy_len == bs {
+                                        payload[..bs].to_vec()
+                                    } else {
+                                        let mut p = vec![0_u8; bs];
+                                        p[..copy_len].copy_from_slice(&payload[..copy_len]);
+                                        p
+                                    };
+                                    if escaped {
+                                        p[0..4].copy_from_slice(&[0u8; 4]);
+                                    }
+                                    Cow::Owned(p)
                                 };
-
-                                if escaped {
-                                    padded[0..4].copy_from_slice(&[0u8; 4]);
-                                }
 
                                 chunk.push((*target, escaped, padded));
                                 item_idx += 1;
