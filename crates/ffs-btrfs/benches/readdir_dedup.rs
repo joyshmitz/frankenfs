@@ -15,12 +15,84 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_btrfs::{
     BTRFS_ITEM_DIR_INDEX, BTRFS_ITEM_DIR_ITEM, BtrfsBTree, BtrfsDirItem, BtrfsKey,
-    InMemoryCowBtrfsTree, btrfs_name_hash, parse_dir_items,
+    InMemoryCowBtrfsTree, btrfs_name_hash, parse_dir_items, visit_dir_items,
 };
 use std::collections::HashSet;
 use std::hint::black_box;
 
 const FILES: usize = 3000;
+const PARSE_PAYLOADS: usize = 1024;
+
+type ProjectedDirItem = (u64, u8, u64, u8, Vec<u8>);
+
+fn build_parse_payloads() -> Vec<Vec<u8>> {
+    (0..PARSE_PAYLOADS)
+        .map(|index| {
+            BtrfsDirItem {
+                child_objectid: 10_000 + index as u64,
+                child_key_type: 1,
+                child_key_offset: index as u64 * 7,
+                file_type: 1,
+                name: format!("file{index:06}").into_bytes(),
+            }
+            .to_bytes()
+        })
+        .collect()
+}
+
+fn project_owned_parser(payloads: &[Vec<u8>]) -> Vec<ProjectedDirItem> {
+    let mut rows = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        for item in parse_dir_items(payload).expect("owned parse") {
+            rows.push((
+                item.child_objectid,
+                item.child_key_type,
+                item.child_key_offset,
+                item.file_type,
+                item.name,
+            ));
+        }
+    }
+    rows
+}
+
+fn project_borrowed_visitor(payloads: &[Vec<u8>]) -> Vec<ProjectedDirItem> {
+    let mut rows = Vec::with_capacity(payloads.len());
+    for payload in payloads {
+        visit_dir_items(payload, |item| {
+            rows.push((
+                item.child_objectid,
+                item.child_key_type,
+                item.child_key_offset,
+                item.file_type,
+                item.name.to_vec(),
+            ));
+        })
+        .expect("borrowed visit");
+    }
+    rows
+}
+
+fn bench_readdir_parse_projection(c: &mut Criterion) {
+    let payloads = build_parse_payloads();
+    let control = project_owned_parser(&payloads);
+    let candidate = project_borrowed_visitor(&payloads);
+    assert_eq!(
+        candidate, control,
+        "borrowed projection must match owned parser"
+    );
+
+    let mut group = c.benchmark_group("btrfs_readdir_parse_projection_1024");
+    for control in ["owned_parser_control_a", "owned_parser_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| black_box(project_owned_parser(black_box(&payloads))))
+        });
+    }
+    group.bench_function("borrowed_visitor_candidate", |b| {
+        b.iter(|| black_box(project_borrowed_visitor(black_box(&payloads))))
+    });
+    group.finish();
+}
 
 /// Build the rows readdir produces: each file as a DIR_INDEX row and a DIR_ITEM
 /// row (same name; DIR_ITEM gets the high-bit sort bias), then sorted by key.
@@ -439,6 +511,7 @@ fn bench_dir_index_seq_seed(c: &mut Criterion) {
 
 criterion_group!(
     readdir_dedup,
+    bench_readdir_parse_projection,
     bench_readdir_dedup,
     bench_readdir_collect,
     bench_remove_named_dir_item,

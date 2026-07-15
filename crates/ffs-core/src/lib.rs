@@ -52,8 +52,9 @@ use ffs_btrfs::{
     enumerate_snapshots, enumerate_subvolumes, find_xattr_item_value, fsflags_to_btrfs_inode_flags,
     generate_send_stream, lookup_data_block_csum, map_logical_to_physical,
     parse_btrfs_tree_node_owned, parse_dir_items, parse_extent_data, parse_inode_item,
-    parse_root_item, parse_xattr_item_names, parse_xattr_items, walk_chunk_tree, walk_tree,
-    walk_tree_floor_with_nodes, walk_tree_parallel_with_nodes, walk_tree_range_parallel_with_nodes,
+    parse_root_item, parse_xattr_item_names, parse_xattr_items, visit_dir_items, walk_chunk_tree,
+    walk_tree, walk_tree_floor_with_nodes, walk_tree_parallel_with_nodes,
+    walk_tree_range_parallel_with_nodes,
     writeback::{DiskWritebackContext, WriteDependencyDag, WritebackExecutor},
     xflags_to_btrfs_inode_flags,
 };
@@ -8838,30 +8839,16 @@ impl OpenFs {
         data: &[u8],
         rows: &mut Vec<(u64, DirEntry)>,
     ) -> Result<(), FfsError> {
-        let parsed = match parse_dir_items(data) {
-            Ok(p) => p,
-            Err(e) => {
-                warn!(
-                    inode = canonical_dir,
-                    item_type = key.item_type,
-                    "btrfs invalid_dir_entry"
-                );
-                return Err(parse_to_ffs_error(&e));
-            }
+        // Prefer DIR_INDEX ordering when available. DIR_ITEM entries get a
+        // high-bit bias so they naturally sort after DIR_INDEX.
+        let base = if key.item_type == BTRFS_ITEM_DIR_INDEX {
+            key.offset
+        } else {
+            key.offset | (1_u64 << 63)
         };
-        for (idx, dir_item) in parsed.into_iter().enumerate() {
-            let local_idx = u64::try_from(idx).map_err(|_| FfsError::Corruption {
-                block: 0,
-                detail: "directory index conversion overflow".into(),
-            })?;
-            // Prefer DIR_INDEX ordering when available. DIR_ITEM entries get
-            // a high-bit bias so they naturally sort after DIR_INDEX.
-            let base = if key.item_type == BTRFS_ITEM_DIR_INDEX {
-                key.offset
-            } else {
-                key.offset | (1_u64 << 63)
-            };
-
+        let rows_start = rows.len();
+        let mut local_idx = 0_u64;
+        let parsed = visit_dir_items(data, |dir_item| {
             trace!(
                 inode = canonical_dir,
                 child_inode = dir_item.child_objectid,
@@ -8876,9 +8863,21 @@ impl OpenFs {
                     ino: InodeNumber(dir_item.child_objectid),
                     offset: 0,
                     kind: Self::btrfs_dir_type_to_file_type(dir_item.file_type),
-                    name: dir_item.name,
+                    name: dir_item.name.to_vec(),
                 },
             ));
+            local_idx = local_idx.saturating_add(1);
+        });
+        if let Err(e) = parsed {
+            // The owned parser returned no entries on any malformed payload;
+            // preserve that all-or-nothing projection contract.
+            rows.truncate(rows_start);
+            warn!(
+                inode = canonical_dir,
+                item_type = key.item_type,
+                "btrfs invalid_dir_entry"
+            );
+            return Err(parse_to_ffs_error(&e));
         }
         Ok(())
     }

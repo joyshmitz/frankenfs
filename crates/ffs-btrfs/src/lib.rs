@@ -1074,6 +1074,20 @@ pub struct BtrfsDirItem {
     pub name: Vec<u8>,
 }
 
+/// Borrowed directory entry produced while walking a DIR_ITEM / DIR_INDEX
+/// payload.
+///
+/// Consumers that immediately project entries into another owned type can use
+/// [`visit_dir_items`] to avoid allocating an intermediate `Vec<BtrfsDirItem>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BtrfsDirItemRef<'a> {
+    pub child_objectid: u64,
+    pub child_key_type: u8,
+    pub child_key_offset: u64,
+    pub file_type: u8,
+    pub name: &'a [u8],
+}
+
 impl BtrfsDirItem {
     /// Fallibly serialize to the on-disk DIR_ITEM / DIR_INDEX layout.
     ///
@@ -1891,11 +1905,18 @@ pub fn parse_inode_item(data: &[u8]) -> Result<BtrfsInodeItem, ParseError> {
     })
 }
 
-/// Parse one or more directory entries from a DIR_ITEM or DIR_INDEX payload.
-pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
+/// Visit one or more directory entries from a DIR_ITEM or DIR_INDEX payload.
+///
+/// The callback receives borrowed names after the same field and bounds
+/// validation performed by [`parse_dir_items`]. If a later entry is malformed,
+/// callbacks for its valid prefix may already have run; callers that retain
+/// output should roll that prefix back when this function returns an error.
+pub fn visit_dir_items(
+    data: &[u8],
+    mut visit: impl FnMut(BtrfsDirItemRef<'_>),
+) -> Result<(), ParseError> {
     const HEADER: usize = 30; // disk_key(17) + transid(8) + data_len(2) + name_len(2) + type(1)
 
-    let mut out = Vec::new();
     let mut cur = 0_usize;
     while cur < data.len() {
         if cur + HEADER > data.len() {
@@ -1942,17 +1963,32 @@ pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
             });
         }
 
-        out.push(BtrfsDirItem {
+        visit(BtrfsDirItemRef {
             child_objectid,
             child_key_type,
             child_key_offset,
             file_type,
-            name: data[name_start..name_end].to_vec(),
+            name: &data[name_start..name_end],
         });
 
         cur = name_end;
     }
 
+    Ok(())
+}
+
+/// Parse one or more directory entries from a DIR_ITEM or DIR_INDEX payload.
+pub fn parse_dir_items(data: &[u8]) -> Result<Vec<BtrfsDirItem>, ParseError> {
+    let mut out = Vec::new();
+    visit_dir_items(data, |item| {
+        out.push(BtrfsDirItem {
+            child_objectid: item.child_objectid,
+            child_key_type: item.child_key_type,
+            child_key_offset: item.child_key_offset,
+            file_type: item.file_type,
+            name: item.name.to_vec(),
+        });
+    })?;
     Ok(out)
 }
 
