@@ -700,7 +700,7 @@ fn insert_inner(
     }
 
     // Internal root: descend to find the right leaf.
-    let indexes = parse_index_entries(root_bytes, &header)?;
+    let mut indexes = parse_index_entries(root_bytes, &header)?;
     let child_pos = find_index_pos(&indexes, extent.logical_block);
     let child_block = indexes[child_pos].leaf_block;
     let old_separator = indexes[child_pos].logical_block;
@@ -713,7 +713,6 @@ fn insert_inner(
 
     if let Some(new_entry) = split {
         // Child was split, need to insert new index entry in root.
-        let mut indexes = parse_index_entries(root_bytes, &header)?;
         if separator_changed {
             indexes[child_pos].logical_block = extent.logical_block;
         }
@@ -733,7 +732,6 @@ fn insert_inner(
             grow_root_index(cx, dev, root_bytes, &header, &indexes, alloc)
         }
     } else if separator_changed {
-        let mut indexes = parse_index_entries(root_bytes, &header)?;
         indexes[child_pos].logical_block = extent.logical_block;
         write_index_root(root_bytes, &header, &indexes);
         Ok(())
@@ -819,7 +817,7 @@ fn insert_descend(
         }))
     } else {
         // Internal node: descend further.
-        let indexes = parse_index_entries(data, &header)?;
+        let mut indexes = parse_index_entries(data, &header)?;
         let child_pos = find_index_pos(&indexes, extent.logical_block);
         let child_block = indexes[child_pos].leaf_block;
         let old_separator = indexes[child_pos].logical_block;
@@ -831,7 +829,6 @@ fn insert_descend(
         let separator_changed = extent.logical_block < old_separator;
 
         if let Some(new_entry) = split {
-            let mut indexes = parse_index_entries(data, &header)?;
             if separator_changed {
                 indexes[child_pos].logical_block = extent.logical_block;
             }
@@ -875,7 +872,6 @@ fn insert_descend(
                 }))
             }
         } else if separator_changed {
-            let mut indexes = parse_index_entries(data, &header)?;
             indexes[child_pos].logical_block = extent.logical_block;
             let new_data = serialize_index_block(block_size, depth, &indexes);
             write_node(cx, dev, &*alloc, BlockNumber(block), new_data)?;

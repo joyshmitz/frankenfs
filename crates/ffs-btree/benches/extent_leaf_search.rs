@@ -22,6 +22,7 @@ use ffs_ondisk::{Ext4Extent, Ext4ExtentIndex};
 use std::hint::black_box;
 
 const LEAF_ENTRIES_4K: u32 = 340;
+const INDEX_ENTRY_SIZE: usize = 12;
 const INDEX_STRIDE: u32 = 1024;
 const PROBE_COUNT: usize = 2048;
 
@@ -51,6 +52,77 @@ fn build_full_index() -> Vec<Ext4ExtentIndex> {
             leaf_block: 2_000_000 + u64::from(i),
         })
         .collect()
+}
+
+fn encode_index_entries(indexes: &[Ext4ExtentIndex]) -> Vec<u8> {
+    let mut encoded = Vec::with_capacity(indexes.len() * INDEX_ENTRY_SIZE);
+    for index in indexes {
+        encoded.extend_from_slice(&index.logical_block.to_le_bytes());
+        encoded.extend_from_slice(&(index.leaf_block as u32).to_le_bytes());
+        encoded.extend_from_slice(&((index.leaf_block >> 32) as u16).to_le_bytes());
+        encoded.extend_from_slice(&0_u16.to_le_bytes());
+    }
+    encoded
+}
+
+fn decode_index_entries(encoded: &[u8]) -> Vec<Ext4ExtentIndex> {
+    encoded
+        .chunks_exact(INDEX_ENTRY_SIZE)
+        .map(|entry| {
+            let logical_block = u32::from_le_bytes([entry[0], entry[1], entry[2], entry[3]]);
+            let leaf_lo = u32::from_le_bytes([entry[4], entry[5], entry[6], entry[7]]);
+            let leaf_hi = u16::from_le_bytes([entry[8], entry[9]]);
+            Ext4ExtentIndex {
+                logical_block,
+                leaf_block: u64::from(leaf_lo) | (u64::from(leaf_hi) << 32),
+            }
+        })
+        .collect()
+}
+
+fn index_insert_digest(indexes: &[Ext4ExtentIndex]) -> u64 {
+    indexes
+        .iter()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |digest, index| {
+            digest
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(u64::from(index.logical_block))
+                .wrapping_mul(0x100_0000_01b3)
+                .wrapping_add(index.leaf_block)
+        })
+}
+
+fn index_child_pos(indexes: &[Ext4ExtentIndex], target: u32) -> usize {
+    indexes
+        .partition_point(|index| index.logical_block <= target)
+        .saturating_sub(1)
+}
+
+fn insert_with_parent_reparse(
+    encoded: &[u8],
+    target: u32,
+    new_entry: Ext4ExtentIndex,
+) -> (u64, u64) {
+    let indexes = decode_index_entries(encoded);
+    let child_block = indexes[index_child_pos(&indexes, target)].leaf_block;
+
+    let mut indexes = decode_index_entries(encoded);
+    let insert_pos = indexes.partition_point(|index| index.logical_block < new_entry.logical_block);
+    indexes.insert(insert_pos, new_entry);
+    (child_block, index_insert_digest(&indexes))
+}
+
+fn insert_with_retained_parent(
+    encoded: &[u8],
+    target: u32,
+    new_entry: Ext4ExtentIndex,
+) -> (u64, u64) {
+    let mut indexes = decode_index_entries(encoded);
+    let child_block = indexes[index_child_pos(&indexes, target)].leaf_block;
+
+    let insert_pos = indexes.partition_point(|index| index.logical_block < new_entry.logical_block);
+    indexes.insert(insert_pos, new_entry);
+    (child_block, index_insert_digest(&indexes))
 }
 
 fn build_probes() -> Vec<u32> {
@@ -348,10 +420,54 @@ fn bench_index_range_prefix(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_index_insert_reparse(c: &mut Criterion) {
+    let encoded = encode_index_entries(&build_full_index());
+    let target = 200 * INDEX_STRIDE + 1;
+    let new_entry = Ext4ExtentIndex {
+        logical_block: 200 * INDEX_STRIDE + INDEX_STRIDE / 2,
+        leaf_block: 3_000_000,
+    };
+
+    let reparsed = insert_with_parent_reparse(&encoded, target, new_entry);
+    let retained = insert_with_retained_parent(&encoded, target, new_entry);
+    assert_eq!(reparsed, retained, "retained parent changed insert result");
+
+    let mut group = c.benchmark_group("extent_index_insert_reparse_340");
+    group.bench_function("reparse_parent_a", |b| {
+        b.iter(|| {
+            black_box(insert_with_parent_reparse(
+                black_box(&encoded),
+                black_box(target),
+                black_box(new_entry),
+            ))
+        });
+    });
+    group.bench_function("reparse_parent_b", |b| {
+        b.iter(|| {
+            black_box(insert_with_parent_reparse(
+                black_box(&encoded),
+                black_box(target),
+                black_box(new_entry),
+            ))
+        });
+    });
+    group.bench_function("retain_validated_parent", |b| {
+        b.iter(|| {
+            black_box(insert_with_retained_parent(
+                black_box(&encoded),
+                black_box(target),
+                black_box(new_entry),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     extent_leaf_search,
     bench_leaf_search_validation,
     bench_leaf_range_prefix,
-    bench_index_range_prefix
+    bench_index_range_prefix,
+    bench_index_insert_reparse
 );
 criterion_main!(extent_leaf_search);
