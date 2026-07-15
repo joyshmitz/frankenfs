@@ -80,6 +80,29 @@ fn bounded_cutoff_scan(pointers: &[u32], base: u64, cutoff: u64, entry_span: u64
     (visited, digest)
 }
 
+#[inline(never)]
+fn bounded_leaf_scan(pointers: &[u32], base: u64, cutoff: u64) -> (u64, u64) {
+    let ppb = pointers.len() as u64;
+    let first_entry = if cutoff == u64::MAX {
+        ppb
+    } else {
+        cutoff.saturating_sub(base).min(ppb)
+    };
+    let mut visited = 0u64;
+    let mut digest = 0u64;
+    for i in first_entry..ppb {
+        let pointer = pointers[i as usize];
+        if pointer == 0 {
+            continue;
+        }
+        visited += 1;
+        digest = digest
+            .wrapping_mul(0x9e37_79b1_85eb_ca87)
+            .wrapping_add(i.rotate_left(17) ^ u64::from(pointer));
+    }
+    (visited, digest)
+}
+
 fn bench(c: &mut Criterion) {
     let zero = vec![0u8; 4096];
     let mut early = vec![0u8; 4096];
@@ -147,6 +170,56 @@ fn bench(c: &mut Criterion) {
                 black_box(base),
                 black_box(cutoff),
                 black_box(entry_span),
+            ))
+        })
+    });
+    g.finish();
+
+    for &(case_base, case_cutoff) in &[
+        (base, base - 1),
+        (base, base),
+        (base, base + 1),
+        (base, cutoff),
+        (base, base + pointers.len() as u64),
+        (base, u64::MAX),
+        (u64::MAX - 3, u64::MAX - 2),
+        (u64::MAX - 3, u64::MAX - 1),
+        (u64::MAX, u64::MAX - 1),
+    ] {
+        assert_eq!(
+            bounded_cutoff_scan(&pointers, case_base, case_cutoff, 1),
+            bounded_leaf_scan(&pointers, case_base, case_cutoff),
+            "leaf guard elision diverged at base={case_base}, cutoff={case_cutoff}"
+        );
+    }
+
+    let mut g = c.benchmark_group("indirect_truncate_leaf_guard_ab");
+    g.bench_function("bounded_guard_a", |b| {
+        b.iter(|| {
+            black_box(bounded_cutoff_scan(
+                black_box(&pointers),
+                black_box(base),
+                black_box(cutoff),
+                black_box(1),
+            ))
+        })
+    });
+    g.bench_function("bounded_guard_b", |b| {
+        b.iter(|| {
+            black_box(bounded_cutoff_scan(
+                black_box(&pointers),
+                black_box(base),
+                black_box(cutoff),
+                black_box(1),
+            ))
+        })
+    });
+    g.bench_function("leaf_guard_elided", |b| {
+        b.iter(|| {
+            black_box(bounded_leaf_scan(
+                black_box(&pointers),
+                black_box(base),
+                black_box(cutoff),
             ))
         })
     });

@@ -768,10 +768,6 @@ fn free_indirect_subtree_range(
         // bitmap read-modify-write per run instead of per block (bd-wgv6x).
         let mut to_free = Vec::new();
         for i in first_entry..ppb {
-            let child_base = base.saturating_add(i.saturating_mul(entry_span));
-            if child_base.saturating_add(entry_span) <= cutoff {
-                continue;
-            }
             let off = match usize::try_from(i) {
                 Ok(idx) => idx * 4,
                 Err(_) => break,
