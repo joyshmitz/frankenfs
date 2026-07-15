@@ -6,6 +6,7 @@
 //! contiguous extent (unlink/truncate) on the write serial floor.
 //!   CARGO_TARGET_DIR=/data/projects/.rch-targets/fs-cc rch exec -- cargo bench --profile release-perf -p ffs-alloc --bench free_range_undo
 use criterion::{Criterion, criterion_group, criterion_main, BatchSize};
+use smallvec::SmallVec;
 use std::hint::black_box;
 
 fn get_bit(bitmap: &[u8], idx: u32) -> bool {
@@ -69,6 +70,26 @@ fn inode_free_known_bit(bitmap: &mut [u8], idx: u32) -> u32 {
     idx
 }
 
+fn inode_alloc_vec_control(bitmap: &mut [u8], idx: u32) -> u32 {
+    let mut undo = Vec::with_capacity(1);
+    if !get_bit(bitmap, idx) {
+        set_bit(bitmap, idx);
+        undo.push(idx);
+    }
+    black_box(&undo);
+    undo[0]
+}
+
+fn inode_alloc_inline_candidate(bitmap: &mut [u8], idx: u32) -> u32 {
+    let mut undo: SmallVec<[u32; 1]> = SmallVec::with_capacity(1);
+    if !get_bit(bitmap, idx) {
+        set_bit(bitmap, idx);
+        undo.push(idx);
+    }
+    black_box(&undo);
+    undo[0]
+}
+
 fn bench(c: &mut Criterion) {
     for count in [256u32, 4096] {
         let bytes = 8192usize; let start = 40u32;
@@ -109,6 +130,49 @@ fn bench(c: &mut Criterion) {
         b.iter_batched(
             || template.clone(),
             |mut bitmap| black_box(inode_free_known_bit(black_box(&mut bitmap), INODE_BIT)),
+            BatchSize::SmallInput,
+        )
+    });
+    g.finish();
+
+    const ALLOC_BIT: u32 = 173;
+    let mut alloc_template = [0xFF_u8; 64];
+    clear_bit(&mut alloc_template, ALLOC_BIT);
+    let mut control = alloc_template;
+    let mut candidate = alloc_template;
+    let control_undo = inode_alloc_vec_control(&mut control, ALLOC_BIT);
+    let candidate_undo = inode_alloc_inline_candidate(&mut candidate, ALLOC_BIT);
+    assert_eq!(control_undo, candidate_undo);
+    assert_eq!(control, candidate, "single-bit allocation bitmap diverged");
+    clear_bit(&mut control, control_undo);
+    clear_bit(&mut candidate, candidate_undo);
+    assert_eq!(control, alloc_template, "Vec-control rollback diverged");
+    assert_eq!(candidate, alloc_template, "inline rollback diverged");
+
+    let mut g = c.benchmark_group("inode_alloc_single_bit_undo");
+    for control_name in ["vec_control_a", "vec_control_b"] {
+        g.bench_function(control_name, |b| {
+            b.iter_batched(
+                || alloc_template,
+                |mut bitmap| {
+                    black_box(inode_alloc_vec_control(
+                        black_box(&mut bitmap),
+                        ALLOC_BIT,
+                    ))
+                },
+                BatchSize::SmallInput,
+            )
+        });
+    }
+    g.bench_function("inline_one_candidate", |b| {
+        b.iter_batched(
+            || alloc_template,
+            |mut bitmap| {
+                black_box(inode_alloc_inline_candidate(
+                    black_box(&mut bitmap),
+                    ALLOC_BIT,
+                ))
+            },
             BatchSize::SmallInput,
         )
     });

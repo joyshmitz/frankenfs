@@ -23,6 +23,7 @@ use ffs_block::BlockDevice;
 use ffs_error::{FfsError, Result};
 use ffs_ondisk::{Ext4GroupDesc, Ext4Superblock};
 use ffs_types::{BlockNumber, GroupNumber, InodeNumber};
+use smallvec::SmallVec;
 use std::sync::{Arc, OnceLock};
 
 // ── Bitmap operations ───────────────────────────────────────────────────────
@@ -191,7 +192,7 @@ pub fn fill_inode_bitmap_padding(bitmap: &mut [u8], inodes_per_group: u32) {
 fn fill_inode_bitmap_padding_with_clear_undo(
     bitmap: &mut [u8],
     inodes_per_group: u32,
-    undo_clear: &mut Vec<u32>,
+    undo_clear: &mut impl Extend<u32>,
 ) {
     // Byte-wise, not bit-wise: the padding region is contiguous (inodes_per_group
     // .. end-of-block), typically thousands of bits, and is set on EVERY inode
@@ -225,7 +226,7 @@ fn fill_inode_bitmap_padding_with_clear_undo(
         let idx = bit as u32;
         if !bitmap_get(bitmap, idx) {
             bitmap_set(bitmap, idx);
-            undo_clear.push(idx);
+            undo_clear.extend([idx]);
         }
         bit += 1;
     }
@@ -238,17 +239,21 @@ fn fill_inode_bitmap_padding_with_clear_undo(
         }
         for k in 0..8u32 {
             if b & (1u8 << k) == 0 {
-                undo_clear.push(u32::try_from(byte_idx).unwrap_or(u32::MAX) * 8 + k);
+                undo_clear.extend([u32::try_from(byte_idx).unwrap_or(u32::MAX) * 8 + k]);
             }
         }
         bitmap[byte_idx] = 0xFF;
     }
 }
 
-fn bitmap_set_with_clear_undo(bitmap: &mut [u8], idx: u32, undo_clear: &mut Vec<u32>) {
+fn bitmap_set_with_clear_undo(
+    bitmap: &mut [u8],
+    idx: u32,
+    undo_clear: &mut impl Extend<u32>,
+) {
     if !bitmap_get(bitmap, idx) {
         bitmap_set(bitmap, idx);
-        undo_clear.push(idx);
+        undo_clear.extend([idx]);
     }
 }
 
@@ -3409,7 +3414,12 @@ pub fn try_alloc_inode_in_group_persist_core(
 
     let inodes_in_group = geo.inodes_in_group(group);
     let reserved = reserved_inodes_in_group(geo, group);
-    let mut rollback_clear_bits = Vec::with_capacity(reserved.len() + 1);
+    // Nonzero groups have no reserved inode prefix, and their padding is
+    // already set after initialization, so the common create records only the
+    // newly allocated inode bit. Keep that one-entry rollback inline; group 0
+    // and first-write padding cases spill without changing insertion order.
+    let mut rollback_clear_bits: SmallVec<[u32; 1]> =
+        SmallVec::with_capacity(reserved.len() + 1);
     for &r in reserved.iter() {
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
