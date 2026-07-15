@@ -23,6 +23,7 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use rayon::{ThreadPool, ThreadPoolBuilder};
+use smallvec::SmallVec;
 use std::cell::RefCell;
 use std::hint::black_box;
 use std::sync::Arc;
@@ -36,6 +37,42 @@ const SMALL_EXTENTS_PER_FILE: usize = 4;
 const DEDICATED_POOL_MAX_THREADS: usize = 16;
 const DEDICATED_POOL_MIN_JOBS: usize = 17;
 const RAM: usize = 128 * 1024; // uncompressed extent size (btrfs cap)
+
+#[derive(Clone, Copy)]
+struct BenchReadJob {
+    idx: usize,
+    logical: u64,
+    compressed_len: usize,
+    comp: u8,
+    ram: usize,
+    disk_bytenr: u64,
+    extent_offset: u64,
+    extent_delta: u64,
+}
+
+fn read_job_digest(job: BenchReadJob) -> u64 {
+    u64::try_from(job.idx)
+        .unwrap_or(u64::MAX)
+        .wrapping_add(job.logical.rotate_left(7))
+        .wrapping_add(u64::try_from(job.compressed_len).unwrap_or(u64::MAX))
+        .wrapping_add(u64::from(job.comp))
+        .wrapping_add(u64::try_from(job.ram).unwrap_or(u64::MAX))
+        .wrapping_add(job.disk_bytenr.rotate_left(13))
+        .wrapping_add(job.extent_offset)
+        .wrapping_add(job.extent_delta)
+}
+
+fn single_read_job_heap_queue(job: BenchReadJob) -> u64 {
+    let mut jobs = Vec::new();
+    jobs.push(job);
+    black_box(jobs).into_iter().map(read_job_digest).sum()
+}
+
+fn single_read_job_inline_queue(job: BenchReadJob) -> u64 {
+    let mut jobs: SmallVec<[BenchReadJob; 1]> = SmallVec::new();
+    jobs.push(job);
+    black_box(jobs).into_iter().map(read_job_digest).sum()
+}
 
 thread_local! {
     static BENCH_ZSTD_DECOMPRESSOR: RefCell<Option<zstd::bulk::Decompressor<'static>>> =
@@ -75,6 +112,52 @@ fn should_build_group(names: &[&str]) -> bool {
                 .iter()
                 .any(|name| name.contains(filter) || filter.contains(name))
         })
+}
+
+fn bench_single_read_job_queue(c: &mut Criterion) {
+    if !should_build_group(&[
+        "btrfs_single_read_job_queue_1",
+        "heap_vec_a",
+        "heap_vec_b",
+        "inline_smallvec_1",
+    ]) {
+        return;
+    }
+
+    let job = BenchReadJob {
+        idx: 7,
+        logical: 0x1000,
+        compressed_len: 8192,
+        comp: 3,
+        ram: RAM,
+        disk_bytenr: 0x20_0000,
+        extent_offset: 4096,
+        extent_delta: 8192,
+    };
+    assert_eq!(
+        single_read_job_heap_queue(job),
+        single_read_job_inline_queue(job),
+        "inline-one read-job queue changed job order or contents"
+    );
+
+    let mut group = c.benchmark_group("btrfs_single_read_job_queue_1");
+    for control in ["heap_vec_a", "heap_vec_b"] {
+        group.bench_function(control, |b| {
+            b.iter_batched(
+                || job,
+                |job| black_box(single_read_job_heap_queue(job)),
+                BatchSize::SmallInput,
+            );
+        });
+    }
+    group.bench_function("inline_smallvec_1", |b| {
+        b.iter_batched(
+            || job,
+            |job| black_box(single_read_job_inline_queue(job)),
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
 }
 
 /// Deterministic pseudo-random byte (no `Math.random` in benches).
@@ -638,6 +721,7 @@ fn bench_lzo_segment_decode(c: &mut Criterion) {
 
 criterion_group!(
     benches,
+    bench_single_read_job_queue,
     bench_decompressed_cache_admission,
     bench_decompress,
     bench_decompress_pool,

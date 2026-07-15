@@ -84,6 +84,7 @@ use ffs_xattr::{XattrReadAccess, XattrWriteAccess};
 use fs_mvcc_store::{FsMvccBlockDevice, FsMvccStore};
 use parking_lot::{Mutex, RwLock};
 use serde::{Deserialize, Serialize};
+use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsStr;
 use std::io::IoSliceMut;
@@ -10251,7 +10252,7 @@ impl OpenFs {
             //                 same point and in the same order as the serial
             //                 path; only the device read runs in parallel.
             // `compressed_len`/`ram` are validated in the serial pass.
-            let mut jobs: Vec<BtrfsReadJob<'_>> = Vec::new();
+            let mut jobs: SmallVec<[BtrfsReadJob<'_>; 1]> = SmallVec::new();
             // Specs for output-writing reads, gathered in extent order during
             // the serial pass; carved into disjoint `&mut out` windows after the
             // pass (so the borrow of `out` does not overlap validation that can
@@ -10622,18 +10623,23 @@ impl OpenFs {
             let results: Vec<(usize, Result<BtrfsDeferredReadResult, FfsError>)> =
                 if jobs.len() <= 1 || rayon::current_thread_index().is_some() {
                     jobs.into_iter().map(exec_job).collect()
-                } else if let Some(pool) = ext4_read_pool() {
-                    // bd-ddryj: bound this cold btrfs read fan-out on the shared
-                    // 16-wide read pool instead of the nproc-wide global one, so the
-                    // concurrent preads into one file's page-cache address_space stop
-                    // converting I/O parallelism into `xa_lock` spinlock contention —
-                    // the same lever the ext4 file-data fan-out already takes.
-                    // `ext4_read_pool` is the historical name for a fs-agnostic bounded
-                    // read pool; the guard above makes this branch non-nested, so
-                    // `install` runs from a non-worker thread.
-                    pool.install(|| jobs.into_par_iter().map(exec_job).collect())
                 } else {
-                    jobs.into_par_iter().map(exec_job).collect()
+                    // More than one job has already spilled the inline-one queue;
+                    // recover its ordered Vec allocation for Rayon's indexed map.
+                    let jobs = jobs.into_vec();
+                    if let Some(pool) = ext4_read_pool() {
+                        // bd-ddryj: bound this cold btrfs read fan-out on the shared
+                        // 16-wide read pool instead of the nproc-wide global one, so the
+                        // concurrent preads into one file's page-cache address_space stop
+                        // converting I/O parallelism into `xa_lock` spinlock contention —
+                        // the same lever the ext4 file-data fan-out already takes.
+                        // `ext4_read_pool` is the historical name for a fs-agnostic bounded
+                        // read pool; the guard above makes this branch non-nested, so
+                        // `install` runs from a non-worker thread.
+                        pool.install(|| jobs.into_par_iter().map(exec_job).collect())
+                    } else {
+                        jobs.into_par_iter().map(exec_job).collect()
+                    }
                 };
             // `results` preserves job order (extent order, then increasing
             // sub-chunk offset within an extent). An uncompressed extent may now
