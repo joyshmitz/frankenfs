@@ -51,6 +51,16 @@ fn partition_extract_future(
     (entries, remaining)
 }
 
+fn sort_stable_by_epoch(mut entries: Vec<WalEntry>) -> Vec<WalEntry> {
+    entries.sort_by_key(|entry| entry.epoch);
+    entries
+}
+
+fn sort_unstable_by_epoch(mut entries: Vec<WalEntry>) -> Vec<WalEntry> {
+    entries.sort_unstable_by_key(|entry| entry.epoch);
+    entries
+}
+
 fn group_commit_entries(unsorted: bool) -> Vec<WalEntry> {
     (0_u64..1024)
         .map(|index| {
@@ -143,6 +153,51 @@ fn bench(c: &mut Criterion) {
             b.iter_batched(
                 || group_commit.clone(),
                 |entries| black_box(partition_extract_future(entries, 1)),
+                BatchSize::SmallInput,
+            );
+        });
+        g.finish();
+    }
+
+    let epoch_sort_entries = group_commit_entries(true);
+    let stable_epoch_sort = sort_stable_by_epoch(epoch_sort_entries.clone());
+    let unstable_epoch_sort = sort_unstable_by_epoch(epoch_sort_entries.clone());
+    assert!(
+        stable_epoch_sort
+            .windows(2)
+            .all(|pair| pair[0].epoch <= pair[1].epoch),
+        "stable control must order entries by epoch"
+    );
+    assert!(
+        unstable_epoch_sort
+            .windows(2)
+            .all(|pair| pair[0].epoch <= pair[1].epoch),
+        "unstable candidate must order entries by epoch"
+    );
+    let mut stable_canonical = stable_epoch_sort;
+    let mut unstable_canonical = unstable_epoch_sort;
+    stable_canonical.sort_unstable_by_key(|entry| entry.txn_id.0);
+    unstable_canonical.sort_unstable_by_key(|entry| entry.txn_id.0);
+    assert_eq!(
+        unstable_canonical, stable_canonical,
+        "epoch sorting must preserve every complete WAL entry"
+    );
+
+    {
+        let mut g = c.benchmark_group("wal_epoch_sort_1024");
+        for control in ["stable_sort_a", "stable_sort_b"] {
+            g.bench_function(control, |b| {
+                b.iter_batched(
+                    || epoch_sort_entries.clone(),
+                    |entries| black_box(sort_stable_by_epoch(entries)),
+                    BatchSize::SmallInput,
+                );
+            });
+        }
+        g.bench_function("unstable_sort_candidate", |b| {
+            b.iter_batched(
+                || epoch_sort_entries.clone(),
+                |entries| black_box(sort_unstable_by_epoch(entries)),
                 BatchSize::SmallInput,
             );
         });

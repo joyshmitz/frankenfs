@@ -442,7 +442,7 @@ impl ExplicitWalPool {
         }
 
         // Sort by epoch for correct ordering; within same epoch, order is arbitrary.
-        all_entries.sort_by_key(|e| e.epoch);
+        all_entries.sort_unstable_by_key(|e| e.epoch);
 
         tracing::info!(
             target: "ffs::wal_buffer",
