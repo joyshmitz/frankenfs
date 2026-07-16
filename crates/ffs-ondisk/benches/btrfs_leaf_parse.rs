@@ -253,6 +253,34 @@ fn chunked_key_ptr_table_digest(block: &[u8]) -> u64 {
     digest
 }
 
+fn normalize_offsets_with_conversion_inside(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let items_end = BTRFS_HEADER_SIZE + nritems * BTRFS_ITEM_SIZE;
+    let mut digest = 0_u64;
+    for item in block[BTRFS_HEADER_SIZE..items_end].chunks_exact(BTRFS_ITEM_SIZE) {
+        let header_size = u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits");
+        let absolute = read_u32_at(item, 17)
+            .checked_add(header_size)
+            .expect("fixture offset fits");
+        digest = digest.rotate_left(7) ^ u64::from(absolute);
+    }
+    digest
+}
+
+fn normalize_offsets_with_conversion_hoisted(block: &[u8]) -> u64 {
+    let nritems = usize::try_from(read_u32_at(block, NRITEMS_OFFSET)).expect("nritems fits");
+    let items_end = BTRFS_HEADER_SIZE + nritems * BTRFS_ITEM_SIZE;
+    let header_size = u32::try_from(BTRFS_HEADER_SIZE).expect("header size fits");
+    let mut digest = 0_u64;
+    for item in block[BTRFS_HEADER_SIZE..items_end].chunks_exact(BTRFS_ITEM_SIZE) {
+        let absolute = read_u32_at(item, 17)
+            .checked_add(header_size)
+            .expect("fixture offset fits");
+        digest = digest.rotate_left(7) ^ u64::from(absolute);
+    }
+    digest
+}
+
 fn bench_parse_dense_leaf(c: &mut Criterion) {
     // Default btrfs nodesize (16 KiB), 1-byte payloads → ~626 items.
     let leaf_16k = build_dense_leaf(16 * 1024, 1);
@@ -341,11 +369,40 @@ fn bench_internal_item_decode_ab(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_header_size_conversion_hoist_ab(c: &mut Criterion) {
+    let leaf_16k = build_dense_leaf(16 * 1024, 1);
+    assert_eq!(
+        normalize_offsets_with_conversion_inside(&leaf_16k),
+        normalize_offsets_with_conversion_hoisted(&leaf_16k),
+        "hoisting the constant header-size conversion changed normalized offsets"
+    );
+
+    let mut group = c.benchmark_group("btrfs_leaf_header_size_hoist_ab");
+    for control in ["conversion_inside_a", "conversion_inside_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                black_box(normalize_offsets_with_conversion_inside(black_box(
+                    &leaf_16k,
+                )))
+            });
+        });
+    }
+    group.bench_function("conversion_hoisted", |b| {
+        b.iter(|| {
+            black_box(normalize_offsets_with_conversion_hoisted(black_box(
+                &leaf_16k,
+            )))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     btrfs_leaf,
     bench_parse_dense_leaf,
     bench_payload_coverage_ab,
     bench_item_table_decode_ab,
-    bench_internal_item_decode_ab
+    bench_internal_item_decode_ab,
+    bench_header_size_conversion_hoist_ab
 );
 criterion_main!(btrfs_leaf);
