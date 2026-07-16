@@ -172,5 +172,137 @@ fn bench_stripe_map(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(chunk_map, bench_chunk_map, bench_stripe_map);
+#[derive(Clone, Copy)]
+struct Raid56PositionProbe {
+    num_stripes: u64,
+    parity_count: u64,
+    p_pos: u64,
+    q_pos: u64,
+    data_index: u64,
+}
+
+#[inline(never)]
+fn raid56_data_position_linear(probe: Raid56PositionProbe) -> u64 {
+    let mut data_seen = 0_u64;
+    for pos in 0..probe.num_stripes {
+        if pos == probe.p_pos || (probe.parity_count == 2 && pos == probe.q_pos) {
+            continue;
+        }
+        if data_seen == probe.data_index {
+            return pos;
+        }
+        data_seen += 1;
+    }
+    u64::MAX
+}
+
+#[inline(never)]
+fn raid56_data_position_bounded(probe: Raid56PositionProbe) -> u64 {
+    if probe.parity_count == 1 {
+        return if probe.data_index < probe.p_pos {
+            probe.data_index
+        } else {
+            probe.data_index + 1
+        };
+    }
+
+    let first_parity = probe.p_pos.min(probe.q_pos);
+    let second_parity = probe.p_pos.max(probe.q_pos);
+    let after_first = if probe.data_index < first_parity {
+        probe.data_index
+    } else {
+        probe.data_index + 1
+    };
+    if after_first < second_parity {
+        after_first
+    } else {
+        after_first + 1
+    }
+}
+
+fn fold_raid56_positions(
+    probes: &[Raid56PositionProbe],
+    select: fn(Raid56PositionProbe) -> u64,
+) -> u64 {
+    probes.iter().copied().fold(0_u64, |digest, probe| {
+        digest.rotate_left(7) ^ select(probe).wrapping_mul(0x9E37_79B1_85EB_CA87)
+    })
+}
+
+fn raid56_position_probes(num_stripes: u64, parity_count: u64) -> Vec<Raid56PositionProbe> {
+    let data_stripes = num_stripes - parity_count;
+    let mut probes = Vec::with_capacity((num_stripes * data_stripes) as usize);
+    for stripe_nr in 0..num_stripes {
+        let rot = stripe_nr % num_stripes;
+        let p_pos = (num_stripes - 1).saturating_sub(rot) % num_stripes;
+        let q_pos = (num_stripes.saturating_sub(2) + num_stripes - rot) % num_stripes;
+        for data_index in 0..data_stripes {
+            probes.push(Raid56PositionProbe {
+                num_stripes,
+                parity_count,
+                p_pos,
+                q_pos,
+                data_index,
+            });
+        }
+    }
+    probes
+}
+
+fn bench_raid56_data_position(c: &mut Criterion) {
+    for num_stripes in 3..=64 {
+        for parity_count in 1..=2 {
+            if num_stripes < parity_count + 2 {
+                continue;
+            }
+            for probe in raid56_position_probes(num_stripes, parity_count) {
+                assert_eq!(
+                    raid56_data_position_linear(probe),
+                    raid56_data_position_bounded(probe),
+                    "num_stripes={num_stripes} parity_count={parity_count}",
+                );
+            }
+        }
+    }
+
+    let probes = raid56_position_probes(16, 2);
+    assert_eq!(
+        fold_raid56_positions(&probes, raid56_data_position_linear),
+        fold_raid56_positions(&probes, raid56_data_position_bounded),
+    );
+
+    let mut group = c.benchmark_group("btrfs_raid56_data_position_16");
+    group.bench_function("linear_control_a", |b| {
+        b.iter(|| {
+            black_box(fold_raid56_positions(
+                black_box(&probes),
+                raid56_data_position_linear,
+            ))
+        });
+    });
+    group.bench_function("linear_control_b", |b| {
+        b.iter(|| {
+            black_box(fold_raid56_positions(
+                black_box(&probes),
+                raid56_data_position_linear,
+            ))
+        });
+    });
+    group.bench_function("bounded_candidate", |b| {
+        b.iter(|| {
+            black_box(fold_raid56_positions(
+                black_box(&probes),
+                raid56_data_position_bounded,
+            ))
+        });
+    });
+    group.finish();
+}
+
+criterion_group!(
+    chunk_map,
+    bench_chunk_map,
+    bench_stripe_map,
+    bench_raid56_data_position
+);
 criterion_main!(chunk_map);

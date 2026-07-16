@@ -1055,7 +1055,7 @@ fn resolve_raid10_stripes(
 /// Parity rotation: for each "row" (stripe_nr), the parity position(s) rotate
 /// across devices. RAID5 has 1 parity (P), RAID6 has 2 (P + Q at adjacent
 /// positions modulo num_stripes). Data stripe indices are mapped to actual
-/// device positions by explicitly skipping all parity positions — this
+/// device positions by adjusting their rank around the parity positions; this
 /// correctly handles the wrap-around case where P is at the last position
 /// and Q wraps to position 0.
 fn resolve_raid56_stripe(
@@ -1101,30 +1101,29 @@ fn resolve_raid56_stripe(
     let p_pos = (num - 1).saturating_sub(rot) % num;
     let q_pos = (num.saturating_sub(2) + num - rot) % num;
 
-    let is_parity = |pos: u64| -> bool {
-        if pos == p_pos {
-            return true;
+    // Map the data rank to its device position by accounting for the one or
+    // two parity slots before it. This selects the same kth non-parity slot as
+    // a linear scan, but its work is independent of the stripe count.
+    let actual_idx = if parity_count == 1 {
+        if stripe_idx < p_pos {
+            stripe_idx
+        } else {
+            stripe_idx + 1
         }
-        if parity_count >= 2 && pos == q_pos {
-            return true;
+    } else {
+        let first_parity = p_pos.min(q_pos);
+        let second_parity = p_pos.max(q_pos);
+        let after_first = if stripe_idx < first_parity {
+            stripe_idx
+        } else {
+            stripe_idx + 1
+        };
+        if after_first < second_parity {
+            after_first
+        } else {
+            after_first + 1
         }
-        false
     };
-
-    // Map data stripe_idx to actual device position by walking positions
-    // and skipping parity ones.
-    let mut data_seen = 0_u64;
-    let mut actual_idx = 0_u64;
-    for pos in 0..num {
-        if is_parity(pos) {
-            continue;
-        }
-        if data_seen == stripe_idx {
-            actual_idx = pos;
-            break;
-        }
-        data_seen += 1;
-    }
 
     let idx = usize::try_from(actual_idx).unwrap_or(usize::MAX);
     let s = chunk.stripes.get(idx).ok_or(ParseError::InvalidField {
