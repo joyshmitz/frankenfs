@@ -30404,7 +30404,7 @@ impl OpenFs {
         // public API still uses Linux namespace syntax (`user.*`,
         // `security.*`, etc.). Reuse the shared validator so direct btrfs
         // callers cannot write payloads that the parser later rejects.
-        ffs_xattr::parse_xattr_name(name).map(|_| ())
+        ffs_xattr::parse_xattr_name_borrowed(name).map(|_| ())
     }
 
     /// Get the value of a specific extended attribute on a btrfs inode.
@@ -35075,10 +35075,10 @@ impl FsOps for OpenFs {
                 // (`parse_xattr_name` errors — e.g. an unhandled prefix, which
                 // the kernel VFS rejects before ext4 anyway) fall back to the
                 // by-name finder so observable behavior is unchanged there.
-                let found = match ffs_xattr::parse_xattr_name(name) {
+                let found = match ffs_xattr::parse_xattr_name_borrowed(name) {
                     Ok((name_index, suffix)) => {
                         let found =
-                            ffs_ondisk::find_ibody_xattr_by_index_name(&inode, name_index, &suffix)
+                            ffs_ondisk::find_ibody_xattr_by_index_name(&inode, name_index, suffix)
                                 .map_err(|e| parse_to_ffs_error(&e))?;
                         match found {
                             Some(v) => Some(v),
@@ -35088,7 +35088,7 @@ impl FsOps for OpenFs {
                                 ffs_ondisk::find_xattr_block_value_by_index_name(
                                     &block_data,
                                     name_index,
-                                    &suffix,
+                                    suffix,
                                 )
                                 .map_err(|e| parse_to_ffs_error(&e))?
                             }

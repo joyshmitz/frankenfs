@@ -20,7 +20,10 @@
 use criterion::{BatchSize, Criterion, criterion_group, criterion_main};
 use ffs_ondisk::{Ext4Inode, Ext4Xattr};
 use ffs_types::all_zero_bytes;
-use ffs_xattr::{XattrReadAccess, XattrWriteAccess, get_xattr_for_access, xattr_exists_for_access};
+use ffs_xattr::{
+    XattrReadAccess, XattrWriteAccess, get_xattr_for_access, parse_xattr_name,
+    parse_xattr_name_borrowed, xattr_exists_for_access,
+};
 use std::hint::black_box;
 
 const N: usize = 96; // attributes packed into the external block
@@ -349,12 +352,79 @@ fn bench_external_value_replace(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_xattr_name_parse_ab(c: &mut Criterion) {
+    const BATCH: usize = 256;
+    let full_name = "user.frankenfs_profile_key";
+
+    for name in [
+        "user.frankenfs_profile_key",
+        "trusted.cache",
+        "security.selinux",
+        "system.custom",
+        "system.posix_acl_access",
+        "system.posix_acl_default",
+        "system.richacl",
+    ] {
+        let (owned_index, owned_suffix) = parse_xattr_name(name).expect("valid xattr name");
+        let (borrowed_index, borrowed_suffix) =
+            parse_xattr_name_borrowed(name).expect("valid xattr name");
+        assert_eq!(owned_index, borrowed_index);
+        assert_eq!(owned_suffix.as_slice(), borrowed_suffix);
+    }
+
+    let mut group = c.benchmark_group("xattr_name_parse_batch_256");
+    group.bench_function("owned_suffix_a", |b| {
+        b.iter(|| {
+            let mut digest = 0_usize;
+            for _ in 0..BATCH {
+                let (name_index, suffix) =
+                    parse_xattr_name(black_box(full_name)).expect("valid user xattr name");
+                digest = digest
+                    .wrapping_add(usize::from(name_index))
+                    .wrapping_add(suffix.len());
+                black_box(suffix);
+            }
+            black_box(digest)
+        });
+    });
+    group.bench_function("owned_suffix_b", |b| {
+        b.iter(|| {
+            let mut digest = 0_usize;
+            for _ in 0..BATCH {
+                let (name_index, suffix) =
+                    parse_xattr_name(black_box(full_name)).expect("valid user xattr name");
+                digest = digest
+                    .wrapping_add(usize::from(name_index))
+                    .wrapping_add(suffix.len());
+                black_box(suffix);
+            }
+            black_box(digest)
+        });
+    });
+    group.bench_function("borrowed_suffix", |b| {
+        b.iter(|| {
+            let mut digest = 0_usize;
+            for _ in 0..BATCH {
+                let (name_index, suffix) =
+                    parse_xattr_name_borrowed(black_box(full_name)).expect("valid user xattr name");
+                digest = digest
+                    .wrapping_add(usize::from(name_index))
+                    .wrapping_add(suffix.len());
+                black_box(suffix);
+            }
+            black_box(digest)
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_exists_probe,
     bench_zero_initialized_external_block,
     bench_new_inline_candidate,
     bench_external_empty_clear,
-    bench_external_value_replace
+    bench_external_value_replace,
+    bench_xattr_name_parse_ab
 );
 criterion_main!(benches);

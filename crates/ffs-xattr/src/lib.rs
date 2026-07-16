@@ -265,14 +265,14 @@ fn build_external_block_owned(block_len: usize, mut entries: Vec<Ext4Xattr>) -> 
     Ok(out)
 }
 
-fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
+fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, &[u8])> {
     if let Some(name) = full_name.strip_prefix("user.") {
         if name.is_empty() {
             return Err(FfsError::Format(
                 "xattr name after user. cannot be empty".to_owned(),
             ));
         }
-        return Ok((EXT4_XATTR_INDEX_USER, name.as_bytes().to_vec()));
+        return Ok((EXT4_XATTR_INDEX_USER, name.as_bytes()));
     }
 
     if let Some(name) = full_name.strip_prefix("trusted.") {
@@ -281,7 +281,7 @@ fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
                 "xattr name after trusted. cannot be empty".to_owned(),
             ));
         }
-        return Ok((EXT4_XATTR_INDEX_TRUSTED, name.as_bytes().to_vec()));
+        return Ok((EXT4_XATTR_INDEX_TRUSTED, name.as_bytes()));
     }
 
     if let Some(name) = full_name.strip_prefix("security.") {
@@ -290,17 +290,17 @@ fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
                 "xattr name after security. cannot be empty".to_owned(),
             ));
         }
-        return Ok((EXT4_XATTR_INDEX_SECURITY, name.as_bytes().to_vec()));
+        return Ok((EXT4_XATTR_INDEX_SECURITY, name.as_bytes()));
     }
 
     if full_name == "system.posix_acl_access" {
-        return Ok((EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, Vec::new()));
+        return Ok((EXT4_XATTR_INDEX_POSIX_ACL_ACCESS, &[]));
     }
     if full_name == "system.posix_acl_default" {
-        return Ok((EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, Vec::new()));
+        return Ok((EXT4_XATTR_INDEX_POSIX_ACL_DEFAULT, &[]));
     }
     if full_name == "system.richacl" {
-        return Ok((EXT4_XATTR_INDEX_RICHACL, Vec::new()));
+        return Ok((EXT4_XATTR_INDEX_RICHACL, &[]));
     }
 
     if let Some(name) = full_name.strip_prefix("system.") {
@@ -309,7 +309,7 @@ fn ext4_name_index_from_full_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
                 "xattr name after system. cannot be empty".to_owned(),
             ));
         }
-        return Ok((EXT4_XATTR_INDEX_SYSTEM, name.as_bytes().to_vec()));
+        return Ok((EXT4_XATTR_INDEX_SYSTEM, name.as_bytes()));
     }
 
     Err(FfsError::Format(format!(
@@ -376,13 +376,19 @@ pub enum XattrStorage {
     External,
 }
 
-/// Parse a full xattr name (`user.foo`, `security.selinux`, ...) into ext4 components.
-pub fn parse_xattr_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
+/// Parse a full xattr name into an ext4 index and a borrowed namespace suffix.
+pub fn parse_xattr_name_borrowed(full_name: &str) -> Result<(u8, &[u8])> {
     let (name_index, name) = ext4_name_index_from_full_name(full_name)?;
     if name.len() > XATTR_NAME_MAX {
         return Err(FfsError::NameTooLong);
     }
     Ok((name_index, name))
+}
+
+/// Parse a full xattr name (`user.foo`, `security.selinux`, ...) into owned ext4 components.
+pub fn parse_xattr_name(full_name: &str) -> Result<(u8, Vec<u8>)> {
+    let (name_index, name) = parse_xattr_name_borrowed(full_name)?;
+    Ok((name_index, name.to_vec()))
 }
 
 /// Set or replace one extended attribute.
@@ -405,7 +411,7 @@ pub fn set_xattr(
         ));
     }
 
-    let (name_index, name) = parse_xattr_name(full_name)?;
+    let (name_index, name) = parse_xattr_name_borrowed(full_name)?;
     check_write_permissions(name_index, access)?;
 
     // get_xattr / list_xattrs / remove_xattr all refuse to operate when the
@@ -427,7 +433,7 @@ pub fn set_xattr(
         Vec::new()
     };
 
-    if let Some(pos) = entry_index(&external_entries, name_index, &name) {
+    if let Some(pos) = entry_index(&external_entries, name_index, name) {
         external_entries[pos].value.clear();
         external_entries[pos].value.extend_from_slice(value);
         let Some(block) = external_block.as_mut() else {
@@ -443,7 +449,7 @@ pub fn set_xattr(
         return Ok(XattrStorage::External);
     }
 
-    if let Some(pos) = entry_index(&inline_entries, name_index, &name) {
+    if let Some(pos) = entry_index(&inline_entries, name_index, name) {
         inline_entries[pos].value = value.to_vec();
         if let Ok(new_ibody) = build_inline_ibody(inode.xattr_ibody.len(), &inline_entries) {
             inode.xattr_ibody = new_ibody;
@@ -464,7 +470,7 @@ pub fn set_xattr(
         let block = &mut **block;
         external_entries.push(Ext4Xattr {
             name_index,
-            name,
+            name: name.to_vec(),
             value: value.to_vec(),
         });
         let new_block = build_external_block_owned(block.len(), external_entries)?;
@@ -477,7 +483,7 @@ pub fn set_xattr(
     let mut inline_candidate = inline_entries;
     inline_candidate.push(Ext4Xattr {
         name_index,
-        name,
+        name: name.to_vec(),
         value: value.to_vec(),
     });
     if let Ok(new_ibody) = build_inline_ibody(inode.xattr_ibody.len(), &inline_candidate) {
@@ -511,11 +517,11 @@ pub fn remove_xattr(
     full_name: &str,
     access: XattrWriteAccess,
 ) -> Result<bool> {
-    let (name_index, name) = parse_xattr_name(full_name)?;
+    let (name_index, name) = parse_xattr_name_borrowed(full_name)?;
     check_write_permissions(name_index, access)?;
 
     let mut inline_entries = parse_inline_entries(inode)?;
-    if let Some(pos) = entry_index(&inline_entries, name_index, &name) {
+    if let Some(pos) = entry_index(&inline_entries, name_index, name) {
         inline_entries.remove(pos);
         inode.xattr_ibody = build_inline_ibody_for_inode_state(
             inode.xattr_ibody.len(),
@@ -536,7 +542,7 @@ pub fn remove_xattr(
     let block = &mut **block;
 
     let mut external_entries = parse_external_entries(block, true)?;
-    let Some(pos) = entry_index(&external_entries, name_index, &name) else {
+    let Some(pos) = entry_index(&external_entries, name_index, name) else {
         return Ok(false);
     };
     external_entries.remove(pos);
@@ -616,7 +622,7 @@ pub fn get_xattr_for_access(
     full_name: &str,
     access: XattrReadAccess,
 ) -> Result<Option<Vec<u8>>> {
-    let (name_index, name) = parse_xattr_name(full_name)?;
+    let (name_index, name) = parse_xattr_name_borrowed(full_name)?;
     if !can_read_name_index(name_index, access) {
         return Ok(None);
     }
@@ -624,7 +630,7 @@ pub fn get_xattr_for_access(
     let inline_entries = parse_inline_entries(inode)?;
     if let Some(entry) = inline_entries
         .iter()
-        .find(|e| e.name_index == name_index && e.name == name)
+        .find(|e| e.name_index == name_index && e.name.as_slice() == name)
     {
         return Ok(Some(entry.value.clone()));
     }
@@ -639,7 +645,7 @@ pub fn get_xattr_for_access(
         let external_entries = parse_external_entries(block, true)?;
         if let Some(entry) = external_entries
             .iter()
-            .find(|e| e.name_index == name_index && e.name == name)
+            .find(|e| e.name_index == name_index && e.name.as_slice() == name)
         {
             return Ok(Some(entry.value.clone()));
         }
@@ -673,7 +679,7 @@ pub fn xattr_exists_for_access(
     full_name: &str,
     access: XattrReadAccess,
 ) -> Result<bool> {
-    let (name_index, _name) = parse_xattr_name(full_name)?;
+    let (name_index, _name) = parse_xattr_name_borrowed(full_name)?;
     if !can_read_name_index(name_index, access) {
         return Ok(false);
     }
