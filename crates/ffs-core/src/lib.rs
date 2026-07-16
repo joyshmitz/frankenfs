@@ -14507,23 +14507,36 @@ impl OpenFs {
         {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
 
-            let reads: Vec<Result<EaInodeBlockRead, FfsError>> = jobs
-                .into_par_iter()
-                .map(|job| {
-                    let block = self.read_block_vec(cx, BlockNumber(job.phys))?;
-                    if job.take > block.len() {
-                        return Err(FfsError::Corruption {
-                            block: job.phys,
-                            detail: format!("EA inode {value_inum} short block read"),
-                        });
-                    }
-                    Ok(EaInodeBlockRead {
-                        start: job.start,
-                        end: job.end,
-                        block,
-                    })
+            let read_job = |job: EaInodeReadJob| -> Result<EaInodeBlockRead, FfsError> {
+                let block = self.read_block_vec(cx, BlockNumber(job.phys))?;
+                if job.take > block.len() {
+                    return Err(FfsError::Corruption {
+                        block: job.phys,
+                        detail: format!("EA inode {value_inum} short block read"),
+                    });
+                }
+                Ok(EaInodeBlockRead {
+                    start: job.start,
+                    end: job.end,
+                    block,
                 })
-                .collect();
+            };
+            // bd-ddryj/kdmu4: bound the EA-inode value read fan-out on the shared
+            // 16-wide read pool, not the nproc-wide global one, and serialize a
+            // small or nested fan-out — a large-xattr getxattr reached from a
+            // parallel reader would otherwise convoy the global pool's page-cache
+            // xa_lock, the same contention the sibling ext4 read paths already cap.
+            // Byte-identical: same reads, consumed in job order.
+            let reads: Vec<Result<EaInodeBlockRead, FfsError>> = if jobs.len()
+                < rayon::current_num_threads().max(2)
+                || rayon::current_thread_index().is_some()
+            {
+                jobs.into_iter().map(read_job).collect()
+            } else if let Some(pool) = ext4_read_pool() {
+                pool.install(|| jobs.into_par_iter().map(read_job).collect())
+            } else {
+                jobs.into_par_iter().map(read_job).collect()
+            };
 
             for read in reads {
                 let read = read?;
@@ -14745,14 +14758,23 @@ impl OpenFs {
             }
         }
 
-        // READ (parallel): fetch each present block across the rayon pool, so a
+        // READ (parallel): fetch each present block across the read pool, so a
         // blocking read parks its worker and the per-block latencies overlap.
         let block_reads: Vec<Result<_, FfsError>> = {
             use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
-            valid_ptrs
-                .par_iter()
-                .map(|&ptr| self.read_block_with_scope(cx, scope, BlockNumber(ptr)))
-                .collect()
+            let read_ptr = |&ptr: &u64| self.read_block_with_scope(cx, scope, BlockNumber(ptr));
+            // bd-ddryj/kdmu4: bound the cluster block-read fan-out on the shared
+            // 16-wide read pool and serialize a small or nested fan-out, matching
+            // the sibling ext4 read paths. Byte-identical: same reads, block order.
+            if valid_ptrs.len() < rayon::current_num_threads().max(2)
+                || rayon::current_thread_index().is_some()
+            {
+                valid_ptrs.iter().map(read_ptr).collect()
+            } else if let Some(pool) = ext4_read_pool() {
+                pool.install(|| valid_ptrs.par_iter().map(read_ptr).collect())
+            } else {
+                valid_ptrs.par_iter().map(read_ptr).collect()
+            }
         };
 
         // ASSEMBLE (serial): append the raw cluster bytes in block order,
@@ -15061,9 +15083,8 @@ impl OpenFs {
         // READ (parallel): fill each segment's final destination directly.
         // Rayon preserves Vec collection order for the indexed iterator, so the
         // follow-up loop surfaces the first byte-ordered error as before.
-        let seg_results: Vec<Result<(), FfsError>> = jobs
-            .into_par_iter()
-            .map(|job| match job {
+        let read_job = |job: Ext4IndirectReadJob<'_>| -> Result<(), FfsError> {
+            match job {
                 Ext4IndirectReadJob::Run { phys0, dst } => {
                     self.read_contiguous_into_with_scope(cx, scope, BlockNumber(phys0), dst)
                 }
@@ -15071,8 +15092,24 @@ impl OpenFs {
                     .with_block_bytes(cx, scope, BlockNumber(phys), |block_data| {
                         dst.copy_from_slice(&block_data[in_off..in_off + dst.len()]);
                     }),
-            })
-            .collect();
+            }
+        };
+        // bd-ddryj/kdmu4: bound the indirect (non-extent) data-read fan-out on the
+        // shared 16-wide read pool, not the nproc-wide global one, and serialize a
+        // small or nested fan-out — the same page-cache xa_lock convoy the extent
+        // read path already caps, and the exact nested-rayon coordination cost the
+        // multi-file parallel read gap (bd-kdmu4) fingers. Byte-identical: same
+        // reads to the same disjoint destination windows, consumed in segment order.
+        let seg_results: Vec<Result<(), FfsError>> = if jobs.len()
+            < rayon::current_num_threads().max(2)
+            || rayon::current_thread_index().is_some()
+        {
+            jobs.into_iter().map(read_job).collect()
+        } else if let Some(pool) = ext4_read_pool() {
+            pool.install(|| jobs.into_par_iter().map(read_job).collect())
+        } else {
+            jobs.into_par_iter().map(read_job).collect()
+        };
 
         for result in seg_results {
             result?;
