@@ -84,6 +84,29 @@ fn resolve_binary<'a>(expected: &'a [(u64, Vec<u8>)], recovered: &[u64]) -> Vec<
         .collect()
 }
 
+/// Candidate: use the shared normalized ordinal first, retaining the binary
+/// search for behavior parity if a caller supplies an unexpected order.
+fn resolve_ordinal_or_binary<'a>(
+    expected: &'a [(u64, Vec<u8>)],
+    recovered: &[u64],
+) -> Vec<&'a [u8]> {
+    recovered
+        .iter()
+        .enumerate()
+        .map(|(position, &blk)| {
+            if let Some((expected_block, bytes)) = expected.get(position)
+                && *expected_block == blk
+            {
+                return bytes.as_slice();
+            }
+            let idx = expected
+                .binary_search_by_key(&blk, |(block, _)| *block)
+                .expect("block present");
+            expected[idx].1.as_slice()
+        })
+        .collect()
+}
+
 fn bench_lookup(c: &mut Criterion) {
     let mut group = c.benchmark_group("recovery_build_writeback_blocks");
     for &n in &[64_usize, 512, 4096] {
@@ -104,6 +127,41 @@ fn bench_lookup(c: &mut Criterion) {
             b.iter(|| black_box(resolve_binary(black_box(&expected), black_box(&recovered))));
         });
     }
+    group.finish();
+}
+
+fn bench_ordered_pairing(c: &mut Criterion) {
+    const N: usize = 4_096;
+    let expected = build_expected(N);
+    let recovered: Vec<u64> = expected.iter().map(|(block, _)| *block).collect();
+    let shuffled = build_recovered(N);
+
+    assert_eq!(
+        resolve_binary(&expected, &recovered),
+        resolve_ordinal_or_binary(&expected, &recovered),
+        "ordered recovery pairing changed resolved bytes"
+    );
+    assert_eq!(
+        resolve_binary(&expected, &shuffled),
+        resolve_ordinal_or_binary(&expected, &shuffled),
+        "fallback recovery pairing changed reordered output"
+    );
+
+    let mut group = c.benchmark_group("recovery_writeback_ordered_pairing_4096");
+    group.bench_function("binary_search_control_a", |b| {
+        b.iter(|| black_box(resolve_binary(black_box(&expected), black_box(&recovered))));
+    });
+    group.bench_function("binary_search_control_b", |b| {
+        b.iter(|| black_box(resolve_binary(black_box(&expected), black_box(&recovered))));
+    });
+    group.bench_function("ordinal_or_binary", |b| {
+        b.iter(|| {
+            black_box(resolve_ordinal_or_binary(
+                black_box(&expected),
+                black_box(&recovered),
+            ))
+        });
+    });
     group.finish();
 }
 
@@ -190,6 +248,7 @@ fn bench_absolute_recovery_normalization_handoff(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_lookup,
+    bench_ordered_pairing,
     bench_absolute_recovery_normalization_handoff
 );
 criterion_main!(benches);

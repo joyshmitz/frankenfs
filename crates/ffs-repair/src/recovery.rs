@@ -501,20 +501,25 @@ impl<'a> GroupRecoveryOrchestrator<'a> {
         expected_current: &'b [(BlockNumber, Vec<u8>)],
     ) -> Result<Vec<RecoveryWritebackBlock<'b>>> {
         let mut writeback_blocks = Vec::with_capacity(decode.recovered.len());
-        // `expected_current` is built from the normalized (sorted + deduped)
-        // corrupt indices, so it is strictly ascending and unique by block
-        // number. Binary search each recovered block instead of an O(N) linear
-        // scan, turning the per-recovery cost from O(M·N) into O(M·log N).
-        for recovered in &decode.recovered {
-            let Ok(idx) =
-                expected_current.binary_search_by_key(&recovered.block, |(block, _)| *block)
-            else {
-                return Err(FfsError::RepairFailed(format!(
-                    "missing scrub-time bytes for recovered block {}",
-                    recovered.block.0
-                )));
+        // Both inputs preserve the normalized corrupt-index order. Pair the
+        // common path by ordinal position and retain the binary search as a
+        // behavior-preserving fallback for an unexpectedly reordered decode.
+        for (position, recovered) in decode.recovered.iter().enumerate() {
+            let expected = if let Some((block, expected)) = expected_current.get(position)
+                && *block == recovered.block
+            {
+                expected
+            } else {
+                let Ok(idx) =
+                    expected_current.binary_search_by_key(&recovered.block, |(block, _)| *block)
+                else {
+                    return Err(FfsError::RepairFailed(format!(
+                        "missing scrub-time bytes for recovered block {}",
+                        recovered.block.0
+                    )));
+                };
+                &expected_current[idx].1
             };
-            let (_, expected) = &expected_current[idx];
             writeback_blocks.push(RecoveryWritebackBlock {
                 block: recovered.block,
                 expected_current: expected.as_slice(),
