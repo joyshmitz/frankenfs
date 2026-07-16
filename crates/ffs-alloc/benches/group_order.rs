@@ -15,7 +15,7 @@
 
 use asupersync::Cx;
 use criterion::{Criterion, criterion_group, criterion_main};
-use ffs_alloc::{AllocHint, FsGeometry, GroupStats, alloc_blocks};
+use ffs_alloc::{AllocHint, FsGeometry, GroupStats, alloc_blocks, allocation_group_order};
 use ffs_block::{BlockBuf, BlockDevice};
 use ffs_error::Result as FfsResult;
 use ffs_types::{BlockNumber, GroupNumber};
@@ -137,5 +137,28 @@ fn bench_group_order(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_group_order);
+/// Isolates the work the `alloc_blocks` goal-first fast path eliminates on the
+/// common non-full allocation: building the whole O(group_count) traversal order
+/// (`allocation_group_order`, a `group_count`-sized `Vec` + `seen` bitset) vs the
+/// O(1) goal-group computation it now does instead. The delta grows with fs size.
+fn bench_order_build_eliminated(c: &mut Criterion) {
+    let hint = AllocHint::default();
+    let mut group = c.benchmark_group("allocation_order_build_vs_goal");
+    for &group_count in &[1024_u32, 4096, 16384] {
+        let geo = make_geometry(group_count);
+        group.bench_function(format!("full_order_build_{group_count}"), |b| {
+            b.iter(|| black_box(allocation_group_order(black_box(&geo), black_box(&hint)).unwrap()));
+        });
+        group.bench_function(format!("goal_group_only_{group_count}"), |b| {
+            b.iter(|| {
+                // What the fast path computes instead of the full order.
+                let goal = black_box(&hint).goal_group.unwrap_or(GroupNumber(0));
+                black_box(goal)
+            });
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(benches, bench_group_order, bench_order_build_eliminated);
 criterion_main!(benches);

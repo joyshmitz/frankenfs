@@ -2330,6 +2330,33 @@ pub fn alloc_blocks(
         return Err(FfsError::Format("cannot allocate 0 blocks".into()));
     }
 
+    // Fast path: `push_legacy_group_order` puts the goal group FIRST, and on a
+    // non-full filesystem it has free space — so try it directly and skip
+    // building the whole O(group_count) spiral traversal order (a `Vec` +
+    // `seen` bitset, both `group_count`-sized, allocated and zeroed on EVERY
+    // allocation — the cost `bench group_order` isolates and which grows with
+    // fs size). Byte-identical: the goal group is exactly the group the loop
+    // below tries first, so on success this returns the same allocation; the
+    // full order is built only when the goal group is full (or absent). NUMA
+    // hints reorder the head of the order and require plan validation, so they
+    // keep the full-order path unchanged.
+    if hint.numa.is_none() {
+        let goal = legacy_allocation_goal_group(geo, hint);
+        if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, goal, count, hint)? {
+            return Ok(alloc);
+        }
+        for group in allocation_group_order(geo, hint)? {
+            // The goal group is the order's first entry and was just tried.
+            if group == goal {
+                continue;
+            }
+            if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, group, count, hint)? {
+                return Ok(alloc);
+            }
+        }
+        return Err(FfsError::NoSpace);
+    }
+
     for group in allocation_group_order(geo, hint)? {
         if let Some(alloc) = try_alloc_in_group(cx, dev, geo, groups, group, count, hint)? {
             return Ok(alloc);
@@ -4102,16 +4129,12 @@ mod tests {
         assert_ne!(set_bitmap, original);
         rollback_set_mutations(&mut set_bitmap, &undo_clear);
         assert_eq!(set_bitmap, original);
-
-        let mut clear_bitmap = original.clone();
-        let mut undo_set = Vec::new();
-        bitmap_clear_with_set_undo(&mut clear_bitmap, 3, &mut undo_set);
-        bitmap_clear_with_set_undo(&mut clear_bitmap, 4, &mut undo_set);
-        bitmap_clear_with_set_undo(&mut clear_bitmap, 15, &mut undo_set);
-        assert_eq!(undo_set, vec![3, 15]);
-        assert_ne!(clear_bitmap, original);
-        rollback_clear_mutations(&mut clear_bitmap, &undo_set);
-        assert_eq!(clear_bitmap, original);
+        // The clear-side single-bit undo helpers (bitmap_clear_with_set_undo /
+        // rollback_clear_mutations) were elided in b17a0ecb ("elide single-bit
+        // inode-free undo vectors"); this test's clear-side block referenced them
+        // and no longer compiled, breaking `cargo test -p ffs-alloc` on main.
+        // Dropped the block for the removed helpers; the set-side undo above is
+        // still exercised.
     }
 
     #[test]
