@@ -1029,6 +1029,7 @@ dependencies = [
 name = "ffs-error"
 version = "0.1.0"
 dependencies = [
+ "criterion",
  "libc",
  "thiserror 2.0.18",
 ]
