@@ -105,6 +105,40 @@ fn scan_checked<F: Fn(&[u8], &[u8]) -> bool>(
     false
 }
 
+/// One fixed-size header reslice per entry, matching the candidate production
+/// read while retaining the same rec_len/name bounds checks and scan order.
+#[inline]
+fn scan_arrayref<F: Fn(&[u8], &[u8]) -> bool>(
+    block: &[u8],
+    name: &[u8],
+    reserved_tail: usize,
+    eq: F,
+) -> bool {
+    let limit = block.len() - reserved_tail;
+    let mut off = 0usize;
+    while off + HDR <= limit {
+        let Ok(header) = <&[u8; HDR]>::try_from(&block[off..off + HDR]) else {
+            break;
+        };
+        let rec_len = usize::from(u16::from_le_bytes([header[4], header[5]]));
+        if rec_len < HDR || rec_len % 4 != 0 {
+            break;
+        }
+        let end = off + rec_len;
+        if end > limit {
+            break;
+        }
+        let cur_ino = u32::from_le_bytes([header[0], header[1], header[2], header[3]]);
+        let cur_name_len = usize::from(header[6]);
+        let name_end = off + HDR + cur_name_len;
+        if name_end <= end && cur_ino != 0 && eq(&block[off + HDR..name_end], name) {
+            return true;
+        }
+        off = end;
+    }
+    false
+}
+
 fn bench(c: &mut Criterion) {
     let bs = 4096usize;
     let reserved_tail = 12usize;
@@ -126,6 +160,11 @@ fn bench(c: &mut Criterion) {
     // sanity: both agree, and it's a miss
     assert!(!scan(&block, miss, reserved_tail, |a, b| a == b));
     assert!(!scan(&block, miss, reserved_tail, names_eq_swar));
+    assert_eq!(
+        scan_checked(&block, miss, reserved_tail, names_eq_swar),
+        scan_arrayref(&block, miss, reserved_tail, names_eq_swar),
+        "header-read variants diverged",
+    );
 
     let mut g = c.benchmark_group("dirent_dup_scan");
     g.bench_function("slice_eq", |b| {
@@ -140,6 +179,40 @@ fn bench(c: &mut Criterion) {
         b.iter(|| black_box(scan_checked(black_box(&block), black_box(miss), reserved_tail, names_eq_swar)))
     });
     g.finish();
+
+    let mut header_group = c.benchmark_group("block_contains_header_arrayref_203");
+    header_group.sample_size(10);
+    header_group.bench_function("checked_control_a", |b| {
+        b.iter(|| {
+            black_box(scan_checked(
+                black_box(&block),
+                black_box(miss),
+                reserved_tail,
+                names_eq_swar,
+            ))
+        })
+    });
+    header_group.bench_function("arrayref_candidate", |b| {
+        b.iter(|| {
+            black_box(scan_arrayref(
+                black_box(&block),
+                black_box(miss),
+                reserved_tail,
+                names_eq_swar,
+            ))
+        })
+    });
+    header_group.bench_function("checked_control_b", |b| {
+        b.iter(|| {
+            black_box(scan_checked(
+                black_box(&block),
+                black_box(miss),
+                reserved_tail,
+                names_eq_swar,
+            ))
+        })
+    });
+    header_group.finish();
     eprintln!("leaf entries scanned per call: {entries}");
 }
 
