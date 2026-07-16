@@ -27,6 +27,9 @@ const BTRFS_DISK_KEY_SIZE: usize = 17;
 const BTRFS_CHUNK_FIXED_SIZE: usize = 48;
 /// Size of one btrfs_stripe on disk (devid:u64 + offset:u64 + dev_uuid:16).
 const BTRFS_STRIPE_SIZE: usize = 32;
+/// Smallest encoded sys-chunk entry: one key, one chunk header, one stripe.
+const BTRFS_SYS_CHUNK_MIN_ENTRY_SIZE: usize =
+    BTRFS_DISK_KEY_SIZE + BTRFS_CHUNK_FIXED_SIZE + BTRFS_STRIPE_SIZE;
 /// Objectid for chunk tree items stored in sys_chunk_array.
 const BTRFS_FIRST_CHUNK_TREE_OBJECTID: u64 = 256;
 /// Item type for chunk tree entries in sys_chunk_array.
@@ -523,8 +526,15 @@ fn parse_chunk_stripes(
 ///
 /// The array contains alternating `btrfs_disk_key` + `btrfs_chunk` entries.
 /// Each chunk embeds `num_stripes` stripe descriptors.
-pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
-    let mut entries = Vec::new();
+fn parse_sys_chunk_array_inner(
+    data: &[u8],
+    preallocate_entries: bool,
+) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
+    let mut entries = if preallocate_entries {
+        Vec::with_capacity(data.len() / BTRFS_SYS_CHUNK_MIN_ENTRY_SIZE)
+    } else {
+        Vec::new()
+    };
     let mut cur = 0_usize;
 
     while cur < data.len() {
@@ -558,6 +568,23 @@ pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseE
     }
 
     Ok(entries)
+}
+
+/// Parses the packed Btrfs system chunk array from a superblock.
+///
+/// The array contains alternating `btrfs_disk_key` + `btrfs_chunk` entries.
+/// Each chunk embeds `num_stripes` stripe descriptors.
+pub fn parse_sys_chunk_array(data: &[u8]) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
+    parse_sys_chunk_array_inner(data, false)
+}
+
+/// Benchmark-only old/new switch for the outer sys-chunk entry allocation.
+#[doc(hidden)]
+pub fn bench_parse_sys_chunk_array(
+    data: &[u8],
+    preallocate_entries: bool,
+) -> Result<Vec<BtrfsChunkEntry>, ParseError> {
+    parse_sys_chunk_array_inner(data, preallocate_entries)
 }
 
 // ── Logical → physical mapping ──────────────────────────────────────────────

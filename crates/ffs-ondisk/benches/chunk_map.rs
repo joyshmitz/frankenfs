@@ -12,9 +12,10 @@
 //! data-block read).
 
 use criterion::{Criterion, Throughput, criterion_group, criterion_main};
+use ffs_ondisk::btrfs::bench_parse_sys_chunk_array;
 use ffs_ondisk::{
     BtrfsChunkEntry, BtrfsKey, BtrfsPhysicalMapping, BtrfsRaidProfile, BtrfsStripe,
-    map_logical_to_physical, map_logical_to_stripes,
+    map_logical_to_physical, map_logical_to_stripes, parse_sys_chunk_array,
 };
 use smallvec::SmallVec;
 use std::hint::black_box;
@@ -442,11 +443,95 @@ fn bench_stripe_result_storage(c: &mut Criterion) {
     group.finish();
 }
 
+fn build_sys_chunk_array(entry_count: u64) -> Vec<u8> {
+    const DISK_KEY_SIZE: usize = 17;
+    const CHUNK_FIXED_SIZE: usize = 48;
+    const STRIPE_SIZE: usize = 32;
+
+    let mut data = Vec::with_capacity(
+        usize::try_from(entry_count).expect("entry count fits usize")
+            * (DISK_KEY_SIZE + CHUNK_FIXED_SIZE + STRIPE_SIZE),
+    );
+    for index in 0..entry_count {
+        data.extend_from_slice(&256_u64.to_le_bytes());
+        data.push(228);
+        data.extend_from_slice(&(index << 30).to_le_bytes());
+
+        data.extend_from_slice(&(1_u64 << 30).to_le_bytes());
+        data.extend_from_slice(&2_u64.to_le_bytes());
+        data.extend_from_slice(&(1_u64 << 16).to_le_bytes());
+        data.extend_from_slice(&1_u64.to_le_bytes());
+        data.extend_from_slice(&4096_u32.to_le_bytes());
+        data.extend_from_slice(&4096_u32.to_le_bytes());
+        data.extend_from_slice(&4096_u32.to_le_bytes());
+        data.extend_from_slice(&1_u16.to_le_bytes());
+        data.extend_from_slice(&0_u16.to_le_bytes());
+
+        data.extend_from_slice(&(index + 1).to_le_bytes());
+        data.extend_from_slice(&(0x10_0000 + (index << 30)).to_le_bytes());
+        data.extend_from_slice(&[index as u8; 16]);
+    }
+    data
+}
+
+fn bench_sys_chunk_parse_profile(c: &mut Criterion) {
+    let data = build_sys_chunk_array(16);
+    assert_eq!(
+        parse_sys_chunk_array(&data)
+            .expect("valid sys chunk array")
+            .len(),
+        16,
+    );
+
+    c.bench_function("btrfs_sys_chunk_parse_profile/current_vec_new_16", |b| {
+        b.iter(|| black_box(parse_sys_chunk_array(black_box(&data)).expect("profile parse")));
+    });
+}
+
+fn bench_sys_chunk_entry_prealloc(c: &mut Criterion) {
+    for entry_count in [0_u64, 1, 16] {
+        let data = build_sys_chunk_array(entry_count);
+        assert_eq!(
+            bench_parse_sys_chunk_array(&data, false),
+            bench_parse_sys_chunk_array(&data, true),
+            "entry_count={entry_count}",
+        );
+    }
+
+    let mut malformed = build_sys_chunk_array(16);
+    malformed.pop();
+    assert_eq!(
+        bench_parse_sys_chunk_array(&malformed, false),
+        bench_parse_sys_chunk_array(&malformed, true),
+        "truncated input must preserve the exact parse error",
+    );
+
+    let data = build_sys_chunk_array(16);
+    let mut group = c.benchmark_group("btrfs_sys_chunk_entry_prealloc_16");
+    for control in ["vec_new_control_a", "vec_new_control_b"] {
+        group.bench_function(control, |b| {
+            b.iter(|| {
+                black_box(
+                    bench_parse_sys_chunk_array(black_box(&data), false).expect("control parse"),
+                )
+            });
+        });
+    }
+    group.bench_function("byte_bound_prealloc_candidate", |b| {
+        b.iter(|| {
+            black_box(bench_parse_sys_chunk_array(black_box(&data), true).expect("candidate parse"))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     chunk_map,
     bench_chunk_map,
     bench_stripe_map,
     bench_raid56_data_position,
-    bench_stripe_result_storage
+    bench_stripe_result_storage,
+    bench_sys_chunk_parse_profile,
+    bench_sys_chunk_entry_prealloc
 );
 criterion_main!(chunk_map);
