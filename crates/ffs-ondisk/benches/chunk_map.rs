@@ -11,10 +11,12 @@
 //! chunks, and this runs on every logical->physical mapping (every tree-node and
 //! data-block read).
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{Criterion, Throughput, criterion_group, criterion_main};
 use ffs_ondisk::{
-    BtrfsChunkEntry, BtrfsKey, BtrfsStripe, map_logical_to_physical, map_logical_to_stripes,
+    BtrfsChunkEntry, BtrfsKey, BtrfsPhysicalMapping, BtrfsRaidProfile, BtrfsStripe,
+    map_logical_to_physical, map_logical_to_stripes,
 };
+use smallvec::SmallVec;
 use std::hint::black_box;
 
 const N: u64 = 1000; // a multi-TB filesystem's chunk count
@@ -299,10 +301,152 @@ fn bench_raid56_data_position(c: &mut Criterion) {
     group.finish();
 }
 
+const STRIPE_RESULT_BATCH: usize = 256;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FrozenVecStripeMapping {
+    profile: BtrfsRaidProfile,
+    stripes: Vec<BtrfsPhysicalMapping>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct InlineStripeMapping {
+    profile: BtrfsRaidProfile,
+    stripes: SmallVec<[BtrfsPhysicalMapping; 4]>,
+}
+
+#[inline(never)]
+fn frozen_vec_stripe_mapping(
+    profile: BtrfsRaidProfile,
+    stripes: &[BtrfsPhysicalMapping],
+) -> FrozenVecStripeMapping {
+    FrozenVecStripeMapping {
+        profile,
+        stripes: stripes.to_vec(),
+    }
+}
+
+#[inline(never)]
+fn inline_stripe_mapping(
+    profile: BtrfsRaidProfile,
+    stripes: &[BtrfsPhysicalMapping],
+) -> InlineStripeMapping {
+    InlineStripeMapping {
+        profile,
+        stripes: SmallVec::from_slice(stripes),
+    }
+}
+
+const fn profile_tag(profile: BtrfsRaidProfile) -> u64 {
+    match profile {
+        BtrfsRaidProfile::Single => 1,
+        BtrfsRaidProfile::Dup => 2,
+        BtrfsRaidProfile::Raid0 => 3,
+        BtrfsRaidProfile::Raid1 => 4,
+        BtrfsRaidProfile::Raid1C3 => 5,
+        BtrfsRaidProfile::Raid1C4 => 6,
+        BtrfsRaidProfile::Raid10 => 7,
+        BtrfsRaidProfile::Raid5 => 8,
+        BtrfsRaidProfile::Raid6 => 9,
+    }
+}
+
+fn fold_stripe_result(profile: BtrfsRaidProfile, stripes: &[BtrfsPhysicalMapping]) -> u64 {
+    stripes.iter().fold(profile_tag(profile), |digest, stripe| {
+        digest.rotate_left(7) ^ stripe.devid.wrapping_mul(17) ^ stripe.physical
+    })
+}
+
+fn fold_frozen_vec_batch(
+    stripes: &[BtrfsPhysicalMapping; 6],
+    shapes: &[(BtrfsRaidProfile, usize)],
+) -> u64 {
+    (0..STRIPE_RESULT_BATCH).fold(0_u64, |digest, index| {
+        let (profile, count) = shapes[index % shapes.len()];
+        let result = frozen_vec_stripe_mapping(profile, &stripes[..count]);
+        digest.rotate_left(3) ^ fold_stripe_result(result.profile, &result.stripes)
+    })
+}
+
+fn fold_inline_batch(
+    stripes: &[BtrfsPhysicalMapping; 6],
+    shapes: &[(BtrfsRaidProfile, usize)],
+) -> u64 {
+    (0..STRIPE_RESULT_BATCH).fold(0_u64, |digest, index| {
+        let (profile, count) = shapes[index % shapes.len()];
+        let result = inline_stripe_mapping(profile, &stripes[..count]);
+        digest.rotate_left(3) ^ fold_stripe_result(result.profile, &result.stripes)
+    })
+}
+
+fn bench_stripe_result_storage(c: &mut Criterion) {
+    let stripes = std::array::from_fn(|index| BtrfsPhysicalMapping {
+        devid: index as u64 + 1,
+        physical: 0x10_0000 + (index as u64 * 0x20_0000),
+    });
+    let shapes = [
+        (BtrfsRaidProfile::Single, 1),
+        (BtrfsRaidProfile::Dup, 2),
+        (BtrfsRaidProfile::Raid0, 1),
+        (BtrfsRaidProfile::Raid1, 2),
+        (BtrfsRaidProfile::Raid1C3, 3),
+        (BtrfsRaidProfile::Raid1C4, 4),
+        (BtrfsRaidProfile::Raid10, 2),
+        (BtrfsRaidProfile::Raid5, 1),
+        (BtrfsRaidProfile::Raid6, 1),
+    ];
+
+    for &(profile, count) in &shapes {
+        let control = frozen_vec_stripe_mapping(profile, &stripes[..count]);
+        let candidate = inline_stripe_mapping(profile, &stripes[..count]);
+        assert_eq!(control.profile, candidate.profile);
+        assert_eq!(control.stripes.as_slice(), candidate.stripes.as_slice());
+        assert!(!candidate.stripes.spilled());
+    }
+
+    let spill_control = frozen_vec_stripe_mapping(BtrfsRaidProfile::Raid1, &stripes);
+    let spill_candidate = inline_stripe_mapping(BtrfsRaidProfile::Raid1, &stripes);
+    assert_eq!(spill_control.profile, spill_candidate.profile);
+    assert_eq!(
+        spill_control.stripes.as_slice(),
+        spill_candidate.stripes.as_slice()
+    );
+    assert!(spill_candidate.stripes.spilled());
+    assert_eq!(
+        fold_frozen_vec_batch(&stripes, &shapes),
+        fold_inline_batch(&stripes, &shapes)
+    );
+
+    let mut group = c.benchmark_group("btrfs_stripe_result_storage_256");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(STRIPE_RESULT_BATCH as u64));
+    group.bench_function("vec_control_a", |b| {
+        b.iter(|| {
+            black_box(fold_frozen_vec_batch(
+                black_box(&stripes),
+                black_box(&shapes),
+            ))
+        });
+    });
+    group.bench_function("smallvec_candidate", |b| {
+        b.iter(|| black_box(fold_inline_batch(black_box(&stripes), black_box(&shapes))));
+    });
+    group.bench_function("vec_control_b", |b| {
+        b.iter(|| {
+            black_box(fold_frozen_vec_batch(
+                black_box(&stripes),
+                black_box(&shapes),
+            ))
+        });
+    });
+    group.finish();
+}
+
 criterion_group!(
     chunk_map,
     bench_chunk_map,
     bench_stripe_map,
-    bench_raid56_data_position
+    bench_raid56_data_position,
+    bench_stripe_result_storage
 );
 criterion_main!(chunk_map);

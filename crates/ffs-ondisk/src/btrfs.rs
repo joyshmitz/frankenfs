@@ -6,6 +6,7 @@ use ffs_types::{
     read_le_u16, read_le_u32, read_le_u64, trim_nul_padded,
 };
 use serde::{Deserialize, Serialize};
+use smallvec::{SmallVec, smallvec};
 use std::cmp::Ordering;
 
 const BTRFS_HEADER_SIZE: usize = 101;
@@ -779,7 +780,9 @@ pub struct BtrfsStripeMapping {
     /// For RAID1: 2 entries (either can serve the read).
     /// For RAID0: 1 entry (the stripe owning this offset).
     /// For Single: 1 entry.
-    pub stripes: Vec<BtrfsPhysicalMapping>,
+    /// The common one-to-four-stripe cases stay inline; permissive mirror and
+    /// RAID10 layouts with more stripes spill without changing ordering.
+    pub stripes: SmallVec<[BtrfsPhysicalMapping; 4]>,
 }
 
 /// Map a logical byte address to all readable stripe locations.
@@ -841,7 +844,7 @@ fn resolve_chunk_stripes(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
     profile: BtrfsRaidProfile,
-) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+) -> Result<SmallVec<[BtrfsPhysicalMapping; 4]>, ParseError> {
     match profile {
         BtrfsRaidProfile::Single
         | BtrfsRaidProfile::Dup
@@ -927,7 +930,7 @@ fn resolve_mirror_stripes(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
     profile: BtrfsRaidProfile,
-) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+) -> Result<SmallVec<[BtrfsPhysicalMapping; 4]>, ParseError> {
     validate_mirror_stripes(chunk, profile)?;
     chunk
         .stripes
@@ -940,7 +943,7 @@ fn resolve_mirror_stripes(
 fn resolve_raid0_stripe(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
-) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+) -> Result<SmallVec<[BtrfsPhysicalMapping; 4]>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID0")?;
     validate_stripe_count(chunk)?;
     let num = u64::from(chunk.num_stripes);
@@ -958,7 +961,7 @@ fn resolve_raid0_stripe(
         field: "stripe_index",
         reason: "stripe index out of range",
     })?;
-    Ok(vec![stripe_physical_at(
+    Ok(smallvec![stripe_physical_at(
         s,
         stripe_nr,
         stripe_len,
@@ -970,7 +973,7 @@ fn resolve_raid0_stripe(
 fn resolve_raid10_stripes(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
-) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+) -> Result<SmallVec<[BtrfsPhysicalMapping; 4]>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID10")?;
     validate_stripe_count(chunk)?;
     if chunk.sub_stripes == 0 {
@@ -1025,7 +1028,7 @@ fn resolve_raid10_stripes(
             reason: "stripe offset overflow",
         })?;
 
-    let mut stripes = Vec::with_capacity(sub_usize);
+    let mut stripes = SmallVec::with_capacity(sub_usize);
     for m in 0..sub_usize {
         let idx = base_usize.checked_add(m).ok_or(ParseError::InvalidField {
             field: "stripe_index",
@@ -1062,7 +1065,7 @@ fn resolve_raid56_stripe(
     chunk: &BtrfsChunkEntry,
     offset_within: u64,
     profile: BtrfsRaidProfile,
-) -> Result<Vec<BtrfsPhysicalMapping>, ParseError> {
+) -> Result<SmallVec<[BtrfsPhysicalMapping; 4]>, ParseError> {
     let stripe_len = require_nonzero_stripe_len(chunk, "RAID5/6")?;
     validate_stripe_count(chunk)?;
     let num = u64::from(chunk.num_stripes);
@@ -1130,7 +1133,7 @@ fn resolve_raid56_stripe(
         field: "stripe_index",
         reason: "stripe index out of range",
     })?;
-    Ok(vec![stripe_physical_at(
+    Ok(smallvec![stripe_physical_at(
         s,
         stripe_nr,
         stripe_len,
@@ -6428,6 +6431,30 @@ mod tests {
         assert_eq!(result.stripes[1].devid, 2);
         assert_eq!(result.stripes[0].physical, 0x10_0000 + 4096);
         assert_eq!(result.stripes[1].physical, 0x20_0000 + 4096);
+    }
+
+    #[test]
+    fn stripe_resolve_raid1_spills_without_reordering_extra_mirrors() {
+        let source_stripes: Vec<_> = (1_u64..=6)
+            .map(|devid| stripe(devid, devid * 0x10_0000))
+            .collect();
+        let chunks = vec![make_chunk(
+            0,
+            1_048_576,
+            65_536,
+            chunk_type_flags::BTRFS_BLOCK_GROUP_DATA | chunk_type_flags::BTRFS_BLOCK_GROUP_RAID1,
+            source_stripes,
+            0,
+        )];
+
+        let result = map_logical_to_stripes(&chunks, 4096).unwrap().unwrap();
+        assert!(result.stripes.spilled());
+        assert_eq!(result.stripes.len(), 6);
+        for (index, mapping) in result.stripes.iter().enumerate() {
+            let devid = u64::try_from(index).unwrap() + 1;
+            assert_eq!(mapping.devid, devid);
+            assert_eq!(mapping.physical, devid * 0x10_0000 + 4096);
+        }
     }
 
     #[test]
