@@ -86,5 +86,42 @@ fn bench_statfs_aggregate(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_statfs_aggregate);
+/// Candidate for the read-only mount: the totals are immutable, so serve them
+/// from a memoized O(1) load instead of re-aggregating every group descriptor
+/// per statfs (bd-57lae adjacent / statfs vs-kernel parity gap).
+fn aggregate_memoized(memo: &(u64, u64)) -> (u64, u64) {
+    *memo
+}
+
+fn bench_statfs_ro_memoize(c: &mut Criterion) {
+    let table = build_gd_table();
+    let stats: Vec<GroupStats> = (0..G)
+        .map(|g| GroupStats::from_group_desc(GroupNumber(g as u32), &parse_desc(&table, g)))
+        .collect();
+    let memo = aggregate_group_stats(&stats);
+    // Same totals as either O(group_count) aggregation.
+    assert_eq!(memo, aggregate_parse(&table), "memoized totals diverged");
+
+    let mut group = c.benchmark_group("statfs_ro_memoize_4096_groups");
+    // `recompute_parse` is the read-only statfs COLD cost (parse + would also
+    // csum-verify each descriptor); `recompute_sum` is a LOWER bound on the warm
+    // read-only cost (the production path additionally does a sharded-hashmap
+    // lookup per group + a rayon fan-out). The memo replaces both with an O(1)
+    // load. `memoized_a`/`_b` are the A/A null.
+    group.bench_function("recompute_parse", |b| {
+        b.iter(|| black_box(aggregate_parse(black_box(&table))));
+    });
+    group.bench_function("recompute_sum", |b| {
+        b.iter(|| black_box(aggregate_group_stats(black_box(&stats))));
+    });
+    group.bench_function("memoized_a", |b| {
+        b.iter(|| black_box(aggregate_memoized(black_box(&memo))));
+    });
+    group.bench_function("memoized_b", |b| {
+        b.iter(|| black_box(aggregate_memoized(black_box(&memo))));
+    });
+    group.finish();
+}
+
+criterion_group!(benches, bench_statfs_aggregate, bench_statfs_ro_memoize);
 criterion_main!(benches);

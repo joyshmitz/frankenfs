@@ -1513,6 +1513,16 @@ pub struct OpenFs {
     /// slot matched on a prior read), so a multi-file workload that reads each
     /// inode once never pays the full-tree walk to build the list.
     ext4_hot_extents: arc_swap::ArcSwapOption<(u64, Arc<[ffs_extent::ExtentMapping]>)>,
+    /// Memoized `(blocks_free, files_free)` totals for a READ-ONLY ext4 mount's
+    /// `statfs`. A read-only mount has no `alloc_state`, so `statfs` sums the free
+    /// counts by reading + parsing (and csum-verifying) every group descriptor —
+    /// O(group_count) per call — while the kernel answers from an incrementally
+    /// maintained superblock total in O(1). The descriptors are immutable on a
+    /// read-only mount, so the summed totals are constant: compute them once and
+    /// serve every subsequent `statfs` from here. Only ever consulted on the
+    /// read-only branch (no alloc state); a writable mount sums live `GroupStats`
+    /// and never touches this, so the memo can never go stale.
+    ext4_ro_statfs_totals: std::sync::OnceLock<(u64, u64)>,
     /// Cached MVCC snapshot for a read-only mount. `with_latest_scope` (per
     /// `read_into`) and `block_device_adapter` (per block read) both call
     /// `mvcc_store.read().current_snapshot()`, taking the store's `RwLock` in
@@ -4180,6 +4190,7 @@ impl OpenFs {
             ext4_hot_inode: arc_swap::ArcSwapOption::empty(),
             ext4_hot_parent: arc_swap::ArcSwapOption::empty(),
             ext4_hot_extents: arc_swap::ArcSwapOption::empty(),
+            ext4_ro_statfs_totals: std::sync::OnceLock::new(),
             ro_snapshot: std::sync::OnceLock::new(),
             btrfs_fs_tree_root_cache: Mutex::new(rustc_hash::FxHashMap::default()),
             btrfs_fs_tree_root_fast: AtomicU64::new(0),
@@ -34888,9 +34899,19 @@ impl FsOps for OpenFs {
                     });
                     drop(alloc);
                     totals
+                } else if let Some(&cached) = self.ext4_ro_statfs_totals.get() {
+                    // Read-only mount: the group descriptors are immutable, so the
+                    // summed totals are constant — serve the memoized O(1) value
+                    // instead of re-reading + csum-verifying every group descriptor
+                    // (O(group_count)) on each statfs.
+                    cached
                 } else {
                     let geo = FsGeometry::from_superblock(sb);
-                    self.read_only_statfs_group_desc_totals(cx, scope, sb, &geo)?
+                    let totals = self.read_only_statfs_group_desc_totals(cx, scope, sb, &geo)?;
+                    // Memoize for subsequent statfs calls. `set` is a no-op if a
+                    // concurrent statfs already populated it with the same constant.
+                    let _ = self.ext4_ro_statfs_totals.set(totals);
+                    totals
                 };
                 blocks_free = blocks_free.min(sb.blocks_count);
                 files_free = files_free.min(u64::from(sb.inodes_count));
