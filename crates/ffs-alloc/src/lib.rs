@@ -2553,6 +2553,28 @@ pub fn alloc_blocks_persist(
         return Err(FfsError::Format("cannot allocate 0 blocks".into()));
     }
 
+    // Goal-group-first fast path (the production allocation path): the goal group
+    // is `allocation_group_order`'s first entry and on a non-full fs has free
+    // space, so try it directly and skip building the whole O(group_count) spiral
+    // order + `seen` bitset on every allocation (byte-identical: see `alloc_blocks`).
+    // NUMA hints reorder the head and need plan validation, so they keep the full
+    // order.
+    if hint.numa.is_none() {
+        let goal = legacy_allocation_goal_group(geo, hint);
+        if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, goal, count, hint, pctx)? {
+            return Ok(alloc);
+        }
+        for group in allocation_group_order(geo, hint)? {
+            if group == goal {
+                continue;
+            }
+            if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, group, count, hint, pctx)? {
+                return Ok(alloc);
+            }
+        }
+        return Err(FfsError::NoSpace);
+    }
+
     for group in allocation_group_order(geo, hint)? {
         if let Some(alloc) = try_alloc_safe(cx, dev, geo, groups, group, count, hint, pctx)? {
             return Ok(alloc);
