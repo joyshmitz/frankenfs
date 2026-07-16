@@ -162,6 +162,35 @@ fn io_error_catalog() -> Vec<FfsError> {
     errors
 }
 
+fn raw_errno_catalog() -> Vec<FfsError> {
+    const ERRNOS: [libc::c_int; 16] = [
+        libc::EPERM,
+        libc::ENOENT,
+        libc::EIO,
+        libc::EAGAIN,
+        libc::EACCES,
+        libc::EEXIST,
+        libc::ENOSPC,
+        libc::EROFS,
+        libc::ENOTDIR,
+        libc::EISDIR,
+        libc::ENOTEMPTY,
+        libc::ENAMETOOLONG,
+        libc::EOPNOTSUPP,
+        libc::EINVAL,
+        libc::ETIMEDOUT,
+        libc::EINTR,
+    ];
+
+    (0..64)
+        .map(|index| {
+            FfsError::Io(std::io::Error::from_raw_os_error(
+                ERRNOS[index % ERRNOS.len()],
+            ))
+        })
+        .collect()
+}
+
 #[inline(never)]
 fn frozen_catalog_digest(errors: &[FfsError]) -> i64 {
     errors.iter().fold(0_i64, |digest, error| {
@@ -182,6 +211,7 @@ fn production_catalog_digest(errors: &[FfsError]) -> i64 {
 
 fn bench_errno_map(c: &mut Criterion) {
     let direct_errors = direct_error_catalog();
+    let raw_errors = raw_errno_catalog();
     let mut parity_errors = direct_error_catalog();
     parity_errors.extend(io_error_catalog());
     for error in &parity_errors {
@@ -196,6 +226,11 @@ fn bench_errno_map(c: &mut Criterion) {
         production_catalog_digest(&direct_errors),
         "direct-variant digest changed"
     );
+    assert_eq!(
+        frozen_catalog_digest(&raw_errors),
+        production_catalog_digest(&raw_errors),
+        "raw-errno digest changed"
+    );
 
     let mut group = c.benchmark_group("errno_map_common_direct_variants");
     group.sample_size(10);
@@ -208,6 +243,20 @@ fn bench_errno_map(c: &mut Criterion) {
     });
     group.bench_function("frozen_full_mapper_b", |b| {
         b.iter(|| black_box(frozen_catalog_digest(black_box(&direct_errors))));
+    });
+    group.finish();
+
+    let mut group = c.benchmark_group("errno_map_raw_os_errors_64");
+    group.sample_size(10);
+    group.throughput(Throughput::Elements(raw_errors.len() as u64));
+    group.bench_function("frozen_full_mapper_a", |b| {
+        b.iter(|| black_box(frozen_catalog_digest(black_box(&raw_errors))));
+    });
+    group.bench_function("production", |b| {
+        b.iter(|| black_box(production_catalog_digest(black_box(&raw_errors))));
+    });
+    group.bench_function("frozen_full_mapper_b", |b| {
+        b.iter(|| black_box(frozen_catalog_digest(black_box(&raw_errors))));
     });
     group.finish();
 }
