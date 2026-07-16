@@ -13771,7 +13771,19 @@ impl OpenFs {
             planned.into_iter().map(scan_block).collect()
         } else {
             use rayon::prelude::{IntoParallelIterator, ParallelIterator};
-            planned.into_par_iter().map(scan_block).collect()
+            // Bound the fan-out on the shared 16-wide read pool rather than the
+            // nproc-wide global pool: over-subscribing the negative-lookup block
+            // scan convoys the kernel page-cache xa_lock, the net-negative the
+            // sibling ext4 read/readdir fan-outs already cap via `ext4_read_pool`
+            // (bd-ddryj; readdir measured ~1.4-2.25x slower on the global pool,
+            // bd-neteo). The guard above keeps this branch non-nested, so
+            // `install` runs from a non-worker thread. Same blocks scanned, same
+            // ordered results (first match / lowest-block error unchanged).
+            if let Some(pool) = ext4_read_pool() {
+                pool.install(|| planned.into_par_iter().map(scan_block).collect())
+            } else {
+                planned.into_par_iter().map(scan_block).collect()
+            }
         };
 
         for result in block_results {
