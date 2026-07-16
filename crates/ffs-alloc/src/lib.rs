@@ -3281,10 +3281,21 @@ fn orlov_choose_group_for_dir(_geo: &FsGeometry, groups: &[GroupStats]) -> Resul
         return Err(FfsError::NoSpace);
     }
 
-    // Compute averages.
-    let total_free_inodes: u64 = groups.iter().map(|g| u64::from(g.free_inodes)).sum();
-    let total_free_blocks: u64 = groups.iter().map(|g| u64::from(g.free_blocks)).sum();
-    let total_dirs: u64 = groups.iter().map(|g| u64::from(g.used_dirs)).sum();
+    // Compute averages. Fold the three totals in ONE pass over the group array
+    // instead of three separate `.sum()` passes: on a many-group fs each pass
+    // re-streams every ~96-byte `GroupStats` from memory, so three passes cost 3x
+    // the bandwidth of one fused fold (this runs on every directory create via
+    // `alloc_inode_persist`). Identical totals.
+    let (total_free_inodes, total_free_blocks, total_dirs) = groups.iter().fold(
+        (0_u64, 0_u64, 0_u64),
+        |(free_inodes, free_blocks, dirs), g| {
+            (
+                free_inodes + u64::from(g.free_inodes),
+                free_blocks + u64::from(g.free_blocks),
+                dirs + u64::from(g.used_dirs),
+            )
+        },
+    );
     let n = groups.len() as u64;
     let avg_free_inodes = total_free_inodes / n;
     let avg_free_blocks = total_free_blocks / n;
