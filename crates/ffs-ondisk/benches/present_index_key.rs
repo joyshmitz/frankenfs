@@ -12,7 +12,7 @@
 //! density enough to offset it? Realistic short filenames (~17 bytes, inline in 24).
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use rustc_hash::FxHashMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::hint::black_box;
 
@@ -65,6 +65,82 @@ fn bench_present_index_key(c: &mut Criterion) {
             }
             black_box(acc)
         });
+    });
+    group.finish();
+}
+
+type PresentMap = FxHashMap<Vec<u8>, (u32, u8)>;
+
+fn build_present_index_duplicate_names(keys: &[Vec<u8>]) -> (FxHashSet<Vec<u8>>, PresentMap) {
+    let present: PresentMap = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (key.clone(), (i as u32, 1)))
+        .collect();
+    let names = present.keys().cloned().collect();
+    (names, present)
+}
+
+fn build_present_index_map_only(keys: &[Vec<u8>]) -> (FxHashSet<Vec<u8>>, PresentMap) {
+    let present = keys
+        .iter()
+        .enumerate()
+        .map(|(i, key)| (key.clone(), (i as u32, 1)))
+        .collect();
+    (FxHashSet::default(), present)
+}
+
+fn known_absent(
+    names: &FxHashSet<Vec<u8>>,
+    present: Option<&PresentMap>,
+    name: &[u8],
+) -> bool {
+    match present {
+        Some(present) => !present.contains_key(name),
+        None => !names.contains(name),
+    }
+}
+
+fn bench_present_index_build(c: &mut Criterion) {
+    let keys = names(30_000);
+
+    // The complete present map is authoritative while installed, so an empty
+    // membership set has identical positive/negative answers. If that map is
+    // demoted after a mutation, moving its owned keys restores the exact set
+    // that the duplicate-key representation maintained.
+    let (control_names, control_present) = build_present_index_duplicate_names(&keys);
+    let (candidate_names, candidate_present) = build_present_index_map_only(&keys);
+    assert_eq!(control_present, candidate_present);
+    for key in &keys {
+        assert_eq!(
+            known_absent(&control_names, Some(&control_present), key),
+            known_absent(&candidate_names, Some(&candidate_present), key)
+        );
+    }
+    let absent = b"absent-file.txt";
+    assert_eq!(
+        known_absent(&control_names, Some(&control_present), absent),
+        known_absent(&candidate_names, Some(&candidate_present), absent)
+    );
+
+    let (mut control_names, control_present) = build_present_index_duplicate_names(&keys);
+    let (mut candidate_names, candidate_present) = build_present_index_map_only(&keys);
+    control_names.extend(control_present.into_keys());
+    candidate_names.extend(candidate_present.into_keys());
+    let inserted = b"inserted-after-snapshot".to_vec();
+    control_names.insert(inserted.clone());
+    candidate_names.insert(inserted);
+    assert_eq!(control_names, candidate_names);
+
+    let mut group = c.benchmark_group("ext4_present_index_build_30k");
+    group.bench_function("duplicate_names_a", |b| {
+        b.iter(|| black_box(build_present_index_duplicate_names(black_box(&keys))));
+    });
+    group.bench_function("duplicate_names_b", |b| {
+        b.iter(|| black_box(build_present_index_duplicate_names(black_box(&keys))));
+    });
+    group.bench_function("present_map_only", |b| {
+        b.iter(|| black_box(build_present_index_map_only(black_box(&keys))));
     });
     group.finish();
 }
@@ -212,6 +288,7 @@ fn bench_attr_cache_value(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_present_index_key,
+    bench_present_index_build,
     bench_chain_value,
     bench_attr_cache_value
 );

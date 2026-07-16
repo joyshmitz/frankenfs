@@ -1624,15 +1624,15 @@ struct ReaddirSnapshot {
     entries: Arc<Vec<DirEntry>>,
 }
 
-/// Authoritative set of entry names for one directory, used to answer a
-/// NEGATIVE name lookup (the create existence-check) in O(1) instead of the
-/// O(N) linear block scan that `lookup_name_with_scope` falls back to on an
-/// htree miss. Validation-keyed exactly like [`ReaddirSnapshot`]: a name absent
-/// from `names` is genuinely absent ONLY while `validation` matches the dir's
-/// current (ctime/mtime/size); any unhandled mutation changes the validation,
-/// the match fails, and the lookup safely rebuilds + linear-scans — so a missed
-/// maintenance path can never produce a wrong "absent", only a slow rebuild.
-/// Built lazily on a negative miss; `OpenFs::create` keeps it current
+/// Authoritative name membership for one directory, used to answer a NEGATIVE
+/// lookup (the create existence-check) in O(1) instead of the O(N) linear block
+/// scan that `lookup_name_with_scope` falls back to on an htree miss. Writable
+/// mounts store membership in `names`; a read-only full snapshot stores it in
+/// `present`, which lookup consults first. Validation-keyed exactly like
+/// [`ReaddirSnapshot`]: an absent name is authoritative ONLY while `validation`
+/// matches the directory's current (ctime/mtime/size); any unhandled mutation
+/// changes the validation, the match fails, and lookup safely rebuilds and
+/// scans. Built lazily on a negative miss; `OpenFs::create` keeps it current
 /// incrementally so a create-heavy directory stays O(1)/lookup (bd-f8rd8).
 struct DirNameIndex {
     inode: u64,
@@ -32172,11 +32172,15 @@ impl OpenFs {
         let mut guard = self.dir_name_index_shard(parent_inode.number).lock();
         match guard.as_mut() {
             Some(idx) if idx.inode == parent_inode.number => {
+                // A read-only present snapshot owns every existing name. Move
+                // those keys into the membership set before demoting it so the
+                // set remains complete without keeping duplicate allocations
+                // while the snapshot is authoritative.
+                if let Some(present) = idx.present.take() {
+                    idx.names.extend(present.into_keys());
+                }
                 idx.names.insert(name.to_vec());
                 idx.validation = validation;
-                // A membership insert doesn't carry the full dirent, so the
-                // present-serve snapshot can no longer be trusted as complete.
-                idx.present = None;
             }
             // No index for this dir yet (or a stale/other-dir slot): drop it so
             // the next negative lookup rebuilds against the fresh state.
@@ -34731,11 +34735,13 @@ impl FsOps for OpenFs {
                             .iter()
                             .map(|e| (e.name.clone(), (e.inode, e.file_type)))
                             .collect();
-                    let names = present.keys().cloned().collect();
                     *self.dir_name_index_shard(canonical.0).lock() = Some(DirNameIndex {
                         inode: canonical.0,
                         validation,
-                        names,
+                        // `present` is complete and lookup consults it first, so
+                        // cloning every key into `names` would only duplicate
+                        // ownership. Demotion moves these keys into the set.
+                        names: rustc_hash::FxHashSet::default(),
                         present: Some(present),
                     });
                 }
@@ -48308,6 +48314,28 @@ mod tests {
             .unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].name, b"hello.txt");
+
+        // The read-only readdir snapshot is also the authoritative lookup
+        // index. It must answer both sides after pagination without relying on
+        // the separate membership set.
+        let attr = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(2),
+                OsStr::new("hello.txt"),
+            )
+            .unwrap();
+        assert_eq!(attr.ino, InodeNumber(11));
+        let err = ops
+            .lookup(
+                &cx,
+                &mut RequestScope::empty(),
+                InodeNumber(2),
+                OsStr::new("missing-after-readdir"),
+            )
+            .unwrap_err();
+        assert_eq!(err.to_errno(), libc::ENOENT);
     }
 
     #[test]
