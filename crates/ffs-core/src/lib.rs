@@ -34976,16 +34976,51 @@ impl FsOps for OpenFs {
                 // code concatenated ibody++block and took the first full_name
                 // match, which (names being unique, ibody first) is the same
                 // entry this returns.
-                let found = ffs_ondisk::find_ibody_xattr_by_name(&inode, name)
-                    .map_err(|e| parse_to_ffs_error(&e))?;
-                let found = match found {
-                    Some(v) => Some(v),
-                    None if inode.file_acl != 0 => {
-                        let block_data = self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
-                        ffs_ondisk::find_xattr_block_value_by_name(&block_data, name)
-                            .map_err(|e| parse_to_ffs_error(&e))?
+                //
+                // Resolve the namespace ONCE into (index, suffix) and match each
+                // entry by index + raw-byte suffix — the way the write path
+                // (`entry_index`) and the kernel's xattr handler already match,
+                // and ~2x cheaper per entry than re-stripping the prefix and
+                // running a `from_utf8_lossy` UTF-8 validity scan of every name
+                // (bench `xattr_lookup::ext4_getxattr_finder_*`: 2.06x at 4
+                // entries, 3.5x at 24). For a name in no known namespace
+                // (`parse_xattr_name` errors — e.g. an unhandled prefix, which
+                // the kernel VFS rejects before ext4 anyway) fall back to the
+                // by-name finder so observable behavior is unchanged there.
+                let found = match ffs_xattr::parse_xattr_name(name) {
+                    Ok((name_index, suffix)) => {
+                        let found =
+                            ffs_ondisk::find_ibody_xattr_by_index_name(&inode, name_index, &suffix)
+                                .map_err(|e| parse_to_ffs_error(&e))?;
+                        match found {
+                            Some(v) => Some(v),
+                            None if inode.file_acl != 0 => {
+                                let block_data =
+                                    self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
+                                ffs_ondisk::find_xattr_block_value_by_index_name(
+                                    &block_data,
+                                    name_index,
+                                    &suffix,
+                                )
+                                .map_err(|e| parse_to_ffs_error(&e))?
+                            }
+                            None => None,
+                        }
                     }
-                    None => None,
+                    Err(_) => {
+                        let found = ffs_ondisk::find_ibody_xattr_by_name(&inode, name)
+                            .map_err(|e| parse_to_ffs_error(&e))?;
+                        match found {
+                            Some(v) => Some(v),
+                            None if inode.file_acl != 0 => {
+                                let block_data =
+                                    self.read_block_vec(cx, BlockNumber(inode.file_acl))?;
+                                ffs_ondisk::find_xattr_block_value_by_name(&block_data, name)
+                                    .map_err(|e| parse_to_ffs_error(&e))?
+                            }
+                            None => None,
+                        }
+                    }
                 };
                 let Some((name_index, value, value_inum)) = found else {
                     return Ok(None);
