@@ -1857,27 +1857,29 @@ fn is_reserved(reserved: &[u32], rel_block: u32) -> bool {
 /// reside in group 0.
 #[must_use]
 pub fn reserved_inodes_in_group(geo: &FsGeometry, group: GroupNumber) -> Vec<u32> {
-    // Total number of reserved inodes across the entire filesystem
-    // s_first_ino is 1-based. Reserved are [1, first_inode).
+    (0..reserved_inode_count_in_group(geo, group)).collect()
+}
+
+/// Number of reserved inodes in `group`.
+///
+/// The filesystem's bootstrap inodes `[1, s_first_ino)` are a CONTIGUOUS prefix,
+/// so a group holds `[0, count)` of them: membership is simply `bit < count` and
+/// the reserved set is `0..count`. Unlike reserved *blocks* (bitmaps + inode
+/// tables scattered through the group, hence the sorted `Vec` + binary search),
+/// the reserved-inode set never needs to be materialized — the hot inode
+/// alloc/free paths use this count directly instead of building the `Vec` on
+/// every allocation.
+#[must_use]
+pub fn reserved_inode_count_in_group(geo: &FsGeometry, group: GroupNumber) -> u32 {
+    // s_first_ino is 1-based; reserved inodes are [1, first_inode).
     let total_reserved = u64::from(geo.first_inode.saturating_sub(1));
-
-    // The number of inodes before this group.
     let inodes_before = u64::from(group.0).saturating_mul(u64::from(geo.inodes_per_group));
-
     if inodes_before >= total_reserved {
-        return Vec::new();
+        return 0;
     }
-
-    // The number of reserved inodes that fall into this group.
     let remaining_reserved = total_reserved - inodes_before;
-
     let limit = remaining_reserved.min(u64::from(geo.inodes_in_group(group)));
-    let limit = u32::try_from(limit).unwrap_or(u32::MAX);
-    let mut reserved = Vec::with_capacity(limit as usize);
-    for i in 0..limit {
-        reserved.push(i);
-    }
-    reserved
+    u32::try_from(limit).unwrap_or(u32::MAX)
 }
 
 // Returns true when GDT-block persistence is deferred to flush (env
@@ -3359,8 +3361,7 @@ fn try_alloc_inode_in_group(
     let mut bitmap = bitmap_buf.as_slice().to_vec();
 
     // Mark reserved inodes as allocated.
-    let reserved = reserved_inodes_in_group(geo, group);
-    for &r in reserved.iter() {
+    for r in 0..reserved_inode_count_in_group(geo, group) {
         bitmap_set(&mut bitmap, r);
     }
 
@@ -3473,14 +3474,14 @@ pub fn try_alloc_inode_in_group_persist_core(
     let previous_free_inodes = stats.free_inodes;
 
     let inodes_in_group = geo.inodes_in_group(group);
-    let reserved = reserved_inodes_in_group(geo, group);
+    let reserved_count = reserved_inode_count_in_group(geo, group);
     // Nonzero groups have no reserved inode prefix, and their padding is
     // already set after initialization, so the common create records only the
     // newly allocated inode bit. Keep that one-entry rollback inline; group 0
     // and first-write padding cases spill without changing insertion order.
     let mut rollback_clear_bits: SmallVec<[u32; 1]> =
-        SmallVec::with_capacity(reserved.len() + 1);
-    for &r in reserved.iter() {
+        SmallVec::with_capacity(reserved_count as usize + 1);
+    for r in 0..reserved_count {
         bitmap_set_with_clear_undo(&mut bitmap, r, &mut rollback_clear_bits);
     }
 
@@ -3644,8 +3645,7 @@ pub fn free_inode(
         });
     }
 
-    let reserved = reserved_inodes_in_group(geo, GroupNumber(group_idx));
-    if is_reserved(&reserved, bit_idx) {
+    if bit_idx < reserved_inode_count_in_group(geo, GroupNumber(group_idx)) {
         return Err(FfsError::Corruption {
             block: 0,
             detail: format!("attempt to free reserved inode {}", ino.0),
@@ -3724,8 +3724,7 @@ pub fn free_inode_persist(
             detail: format!("double-free: inode {} already free in bitmap", ino.0),
         });
     }
-    let reserved = reserved_inodes_in_group(geo, group);
-    if is_reserved(&reserved, bit_idx) {
+    if bit_idx < reserved_inode_count_in_group(geo, group) {
         return Err(FfsError::Corruption {
             block: 0,
             detail: format!("attempt to free reserved inode {}", ino.0),
@@ -3839,8 +3838,7 @@ pub fn free_inode_in_group(
             detail: format!("double-free: inode {} already free in bitmap", ino.0),
         });
     }
-    let reserved = reserved_inodes_in_group(geo, group);
-    if is_reserved(&reserved, bit_idx) {
+    if bit_idx < reserved_inode_count_in_group(geo, group) {
         return Err(FfsError::Corruption {
             block: 0,
             detail: format!("attempt to free reserved inode {}", ino.0),
