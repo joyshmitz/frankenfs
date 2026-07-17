@@ -3766,54 +3766,70 @@ fn walk_dir_block_entries(
                 field: "de_rec_len",
                 reason: "overflow",
             })?;
-        if is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
-            && entry_end <= block.len()
-            && all_zero_bytes(&block[entry_end..])
-        {
-            return Err(ParseError::InvalidField {
-                field: "dir_block_tail",
-                reason: "malformed checksum tail header",
-            });
-        }
-        let is_tail = is_dir_checksum_tail(inode, name_len, file_type_raw, rec_len);
 
-        // Detect checksum tail: inode=0, name_len=0, file_type=0xDE, rec_len=12
-        if is_tail {
-            if entry_end > block.len() {
-                return Err(ParseError::InsufficientData {
-                    needed: 12,
-                    offset,
-                    actual: block.len().saturating_sub(offset),
-                });
-            }
-            let tail_end = offset.checked_add(12).ok_or(ParseError::InvalidField {
-                field: "dir_block_tail",
-                reason: "overflow",
-            })?;
-            if tail_end < block.len() && !all_zero_bytes(&block[tail_end..]) {
+        // Only an inode==0 slot can be the checksum tail (inode=0, name_len=0,
+        // file_type=0xDE, rec_len=12), its malformed sibling, or a deleted entry.
+        // A live entry (inode != 0) is none of these, so skip the two per-entry
+        // checksum-tail predicates for it — this walk is the readdir / lookup /
+        // path-resolution hot path (`lookup_in_dir_block` ~31% of an ext4 lookup;
+        // bd-57lae). Byte-identical: both predicates are `inode == 0 && ...`, so
+        // they were already false for every live entry, and the tail/deleted
+        // handling below is reached only when inode==0 either way — the same
+        // errors fire in the same order.
+        if inode == 0 {
+            if is_malformed_dir_checksum_tail(inode, name_len, file_type_raw, rec_len)
+                && entry_end <= block.len()
+                && all_zero_bytes(&block[entry_end..])
+            {
                 return Err(ParseError::InvalidField {
                     field: "dir_block_tail",
-                    reason: "non-zero padding after checksum tail",
+                    reason: "malformed checksum tail header",
                 });
             }
-            tail = Some(Ext4DirEntryTail {
-                checksum: read_le_u32(block, offset + 8)?,
-            });
-            offset = block.len();
-            break;
+
+            // Detect checksum tail: inode=0, name_len=0, file_type=0xDE, rec_len=12
+            if is_dir_checksum_tail(inode, name_len, file_type_raw, rec_len) {
+                if entry_end > block.len() {
+                    return Err(ParseError::InsufficientData {
+                        needed: 12,
+                        offset,
+                        actual: block.len().saturating_sub(offset),
+                    });
+                }
+                let tail_end = offset.checked_add(12).ok_or(ParseError::InvalidField {
+                    field: "dir_block_tail",
+                    reason: "overflow",
+                })?;
+                if tail_end < block.len() && !all_zero_bytes(&block[tail_end..]) {
+                    return Err(ParseError::InvalidField {
+                        field: "dir_block_tail",
+                        reason: "non-zero padding after checksum tail",
+                    });
+                }
+                tail = Some(Ext4DirEntryTail {
+                    checksum: read_le_u32(block, offset + 8)?,
+                });
+                offset = block.len();
+                break;
+            }
+
+            // Deleted entry (inode==0, not the tail): still bounds-check rec_len.
+            if entry_end > block.len() {
+                return Err(ParseError::InvalidField {
+                    field: "de_rec_len",
+                    reason: "directory entry extends past block boundary",
+                });
+            }
+            offset = entry_end;
+            continue;
         }
 
+        // Live entry (inode != 0).
         if entry_end > block.len() {
             return Err(ParseError::InvalidField {
                 field: "de_rec_len",
                 reason: "directory entry extends past block boundary",
             });
-        }
-
-        // Skip deleted entries (inode == 0)
-        if inode == 0 {
-            offset = entry_end;
-            continue;
         }
 
         // Read name bytes
