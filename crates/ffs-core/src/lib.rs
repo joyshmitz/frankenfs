@@ -9524,6 +9524,16 @@ impl OpenFs {
         let dnb = usize::try_from(disk_num_bytes)
             .map_err(|_| FfsError::Format("btrfs disk_num_bytes overflow".into()))?;
         let sectors = dnb.div_ceil(sectorsize);
+        // Reuse ONE sector-sized read buffer across every sector instead of
+        // allocating (and zero-initialising) a fresh `vec![0; sectorsize]` per
+        // sector. `btrfs_read_logical_into`'s `while !out.is_empty()` loop fills
+        // the whole slice or returns Err, so the reused buffer holds exactly the
+        // current sector's bytes at each crc32c — byte-identical to a fresh
+        // allocation (a sector with no recorded csum is skipped before any read,
+        // and never checksummed, so stale bytes are never observed). Eliminates
+        // N-1 heap allocs + memsets on the multi-sector data-csum verify path
+        // (bd-tkv2n btrfs_verify_data_on_read).
+        let mut sector = vec![0_u8; sectorsize];
         for s in 0..sectors {
             let delta = u64::try_from(s * sectorsize)
                 .map_err(|_| FfsError::Format("btrfs csum sector offset overflow".into()))?;
@@ -9533,7 +9543,6 @@ impl OpenFs {
             let Some(expected) = lookup_data_block_csum(csum_items, bytenr, sectorsize) else {
                 continue; // no checksum recorded for this sector
             };
-            let mut sector = vec![0_u8; sectorsize];
             self.btrfs_read_logical_into(cx, bytenr, &mut sector)?;
             let actual = ffs_types::crc32c(&sector);
             if actual != expected {
