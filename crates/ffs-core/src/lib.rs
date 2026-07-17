@@ -23663,12 +23663,33 @@ impl OpenFs {
             // ext4_dec_count never drops a directory below 2 — an htree parent
             // pinned at the dir_nlink sentinel (1) stays put (bd-j12g7).
             Self::ext4_dir_link_dec(parent_inode.links_count, parent)?;
-            let child_extents = self.collect_extents(cx, &child_inode)?;
-            let first_ext = child_extents.first().ok_or_else(|| FfsError::Corruption {
-                block: 0,
-                detail: "directory inode missing data block for '..' update".to_owned(),
-            })?;
-            let dot_dot_block = BlockNumber(first_ext.physical_start);
+            // `..` lives in the moved directory's logical block 0. Resolve only
+            // that block via the extent-cache/hot-slot fast path (descending to
+            // block 0's leaf, O(depth)) instead of materializing the WHOLE extent
+            // list with `collect_extents` (O(extents), a device read per leaf) just
+            // to take `.first()`. Byte-identical for an extent-mapped dir: block 0
+            // is always the first extent, so `.first().physical_start` ==
+            // `resolve_extent(0)`'s physical (no offset). Indirect-mapped dirs keep
+            // the exact legacy path: `resolve_extent` would route them to the
+            // indirect resolver (succeeds), but `collect_extents` errors on their
+            // non-extent i_block — preserving that error keeps this a pure perf
+            // change, not a behaviour change.
+            let dot_dot_block = if child_inode.flags & EXT4_EXTENTS_FL != 0 {
+                let (phys, _unwritten) = self
+                    .resolve_extent(cx, &RequestScope::empty(), &child_inode, 0)?
+                    .ok_or_else(|| FfsError::Corruption {
+                        block: 0,
+                        detail: "directory inode missing data block for '..' update".to_owned(),
+                    })?;
+                BlockNumber(phys)
+            } else {
+                let child_extents = self.collect_extents(cx, &child_inode)?;
+                let first_ext = child_extents.first().ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "directory inode missing data block for '..' update".to_owned(),
+                })?;
+                BlockNumber(first_ext.physical_start)
+            };
             let mut data = self.read_block_vec(cx, dot_dot_block)?;
             let parent_ino_u32 = u32::try_from(new_parent.0)
                 .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
@@ -32829,15 +32850,40 @@ impl OpenFs {
         dir_ino_u32: u32,
         new_parent: InodeNumber,
     ) -> ffs_error::Result<(BlockNumber, Vec<u8>)> {
-        let child_extents = self.collect_extents(cx, dir_inode)?;
-        let first_ext = child_extents
-            .iter()
-            .find(|ext| ext.logical_block == 0 && !ext.is_unwritten())
-            .ok_or_else(|| FfsError::Corruption {
-                block: 0,
-                detail: "directory inode missing logical block zero for '..' update".to_owned(),
-            })?;
-        let dot_dot_block = BlockNumber(first_ext.physical_start);
+        // `..` lives in logical block 0. Resolve only that block via the
+        // extent-cache/hot-slot fast path (O(depth)) instead of materializing the
+        // whole extent list with `collect_extents` (O(extents)) just to `.find()`
+        // the logical-0 extent. `resolve_extent(0)` returns (physical, unwritten)
+        // for block 0, matching the old `find(logical_block == 0 && !is_unwritten)`
+        // exactly: a present, written block 0 -> Some((phys, false)); an unwritten
+        // (true) or absent (None) block 0 -> the same corruption error. Indirect-
+        // mapped dirs keep the legacy path (see the ext4_rename sibling): their
+        // non-extent i_block errors in `collect_extents`, and preserving that error
+        // keeps this byte-identical rather than a behaviour change.
+        let dot_dot_block = if dir_inode.flags & EXT4_EXTENTS_FL != 0 {
+            match self
+                .resolve_extent(cx, &RequestScope::empty(), dir_inode, 0)?
+            {
+                Some((phys, false)) => BlockNumber(phys),
+                _ => {
+                    return Err(FfsError::Corruption {
+                        block: 0,
+                        detail: "directory inode missing logical block zero for '..' update"
+                            .to_owned(),
+                    });
+                }
+            }
+        } else {
+            let child_extents = self.collect_extents(cx, dir_inode)?;
+            let first_ext = child_extents
+                .iter()
+                .find(|ext| ext.logical_block == 0 && !ext.is_unwritten())
+                .ok_or_else(|| FfsError::Corruption {
+                    block: 0,
+                    detail: "directory inode missing logical block zero for '..' update".to_owned(),
+                })?;
+            BlockNumber(first_ext.physical_start)
+        };
         let mut data = self.read_block_vec(cx, dot_dot_block)?;
         let parent_ino_u32 = u32::try_from(new_parent.0)
             .map_err(|_| FfsError::Format("inode number exceeds ext4 32-bit limit".into()))?;
