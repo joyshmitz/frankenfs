@@ -3200,3 +3200,56 @@ Residual mounted gap is 1.43x cold: next levers are daemon-side readahead depth 
 single-stream path, offloading `readdir`/`getattr` the same way (metadata storms), and
 the negotiated `max_readahead` audit. The rejected per-thread-fd stash and the mmap/
 O_DIRECT closures are unaffected by this change.
+
+## 2026-07-22 — three non-KEEPs close the cheap-dispatch vein: metadata offload REJECT, readahead null, request-count null (bd-kdmu4, cc)
+
+Continuation after the 3.85x async-read KEEP (11d82483). Same harness, fixtures, identity
+gates (XOR64 `6136f5eaeccd58af` held in every run below). Session loop occupancy probe
+first: during a cold storm with async-read ON, the loop thread burns 54% of wall, the 8
+`ffs-fuse-rd-*` workers ~50% each — headroom on the loop, workers intermittently starved.
+
+### 1. Metadata-op offload onto the read pool — REJECT (production hunk stashed)
+
+Factored `lookup`/`getattr`/`open`/`opendir`/`readdir` into `serve_*` bodies dispatched
+onto the existing `read_offload` pool (env `FFS_FUSE_ASYNC_META`, writeback-cache mode
+kept inline, `readdirplus` descoped). Same-binary interleaved A/B, 4 mount-cycle reps,
+async-read ON in both arms:
+
+| regime | inline meta (off) | offloaded meta (on) | verdict |
+| --- | --- | --- | --- |
+| cold | 337.2 ms (cv 1.4%) | 351.5 ms (cv 1.8%) | **+4% REGRESSION** |
+| daemon-warm | 236.1 ms (cv 2.7%) | 262.1 ms (cv 3.0%) | **+11% REGRESSION** |
+
+Mechanism: small metadata tasks queue behind large read tasks on the shared 8-thread
+pool; the loop had spare capacity to pump them inline. Stashed as `stash@{0}`
+("metadata-op offload onto read pool"). Retry predicate: only with a SEPARATE small-op
+pool AND a measured session-loop occupancy >90% (loop saturation), e.g. after multiple
+/dev/fuse queues exist. `flush`/`release` offload is predicted-negative by the same
+mechanism — do not try it standalone.
+
+### 2. Kernel readahead sizing (`/sys/class/bdi/<dev>/read_ahead_kb`) — NULL
+
+FUSE bdi defaults to 128 KB. Sweeping 128 → 1024 → 4096 KB (no code change):
+T=1 cold 1381 / 1495 / 1400 ms (flat, ±8% noise); T=16 cold 416 / 404 / 418 ms (flat).
+Raising `max_readahead` in INIT is therefore not a lever on this workload — do not
+plumb it as a mount option expecting wall.
+
+### 3. Request-count instrumentation — coalescing works; T=1 is NOT round-trip-bound
+
+strace read() totals over a T=1 cold GiB: 20,741 calls at ra=128 KB vs 14,581 at
+ra=4096 KB — the kernel DOES issue fewer, larger requests with bigger readahead
+(fuser already advertises `FUSE_ASYNC_READ`; `max_pages` derives from
+`max(max_write, max_readahead)` and `FUSE_MAX_PAGES` is echoed). Yet un-straced wall is
+flat — so the single-stream residual is serial pipeline bubbles (disk read → reply copy →
+next request), not request count. Fixing that means daemon-side prefetch depth/overlap
+(ReadaheadManager) — a structural item, not a config flip.
+
+### Vein status (3 consecutive non-KEEPs → switch per campaign discipline)
+
+The mounted multi-file read surface stands at **1.43x of kernel cold** (from 5.5x at
+session start) with the loop unsaturated and cheap dispatch/config levers exhausted.
+Remaining read-lane items are structural: single-stream prefetch pipelining (bounded
+value; T=1 is a minor real-world surface), and multi-queue /dev/fuse (clone_fd) if the
+loop ever saturates. Next turn switches vein per the alien-graveyard mandate (still
+read-lane: a different primitive class, not more dispatch tuning). mmap/O_DIRECT remain
+closed everywhere (copies ~3% of daemon self-time; bypass 1.00x).
