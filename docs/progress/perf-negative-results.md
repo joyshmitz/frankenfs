@@ -13,6 +13,70 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Shared-channel multiloop FUSE dispatch - 2026-07-22 (REJECT; bd-opb6l)
+
+Status: REJECT and restore the single FUSE receive/dispatch loop. The candidate
+nearly doubled the measured four-client delete throughput, but violated ext4
+allocation/free and durability invariants under repeated churn. No production
+source is retained.
+
+Profile first: the frozen standard mount took 370.291824 ms for an 8,000-file,
+four-directory/four-client delete plus `fsyncdir` storm versus kernel ext4 at
+229.141343 ms (1.616x gap). A stripped daemon cycles profile captured 603 samples
+with zero loss; `__memmove` held 7.12%, `memcmp` 2.37%, and the remaining leading
+frames were FUSE read/write/syscall dispatch. Source attribution then found that
+vendored `fuser::Session::run` has one explicitly non-concurrent receive loop even
+though `MountOptions::resolved_thread_count()` reported four workers on the pinned
+cpuset. Ledger and recent-log grep ruled out the closed delete-serial-floor,
+version-coalescing, Cx-pooling, S3-FIFO slab, Bloom, DenseVisited, and
+write-block-ownership families. The alien-graveyard Arrakis/io_uring primitive was
+therefore tested narrowly: initialize once, then run one FUSE receive buffer/event
+loop per available worker over the shared channel while cloning only the Arc-backed
+adapter state.
+
+The pinned rotating same-host A/A/B run used byte-identical clean ext4 images
+(`e50b838a382a7e90ccaa71174fbce34b4e86626bb1706e835732727e05997aeb`), four
+directories, four clients, exact 128-byte payloads, setup outside timing, directory
+fsync, and 30 admitted 8,000-delete samples per arm:
+
+- frozen-pre control A: 397.520856 ms, CV 1.971210%
+- frozen-pre control B: 400.809427 ms, CV 4.300249%
+- four-loop candidate: 203.287380 ms, CV 2.246183%
+- kernel ext4: 76.778175 ms median, but CV 10.976081% (routing evidence only)
+
+The candidate was 1.963551x faster than the control-pool mean, well beyond the
+0.827270% A/A null spread. A larger 32,000-delete candidate/kernel comparator gave
+670.580733 ms at 0.758367% CV versus 236.532995 ms at 5.352389% CV; the kernel arm
+again missed the under-5% admission gate and no direct-kernel ratio is claimed.
+Frozen/candidate binary SHA-256 values were respectively
+`2918b6450ab97421e70b246776d5759de854ac4180d7988058e9ccd9d1788cf1` and
+`1ca2a3a46c8f6c2b54d8d6272c222a3f8ce61aa8015e76f093570b857c8083b3`.
+
+Correctness veto: three named scoped workers plus the main loop proved the
+candidate was actually live. Under repeated near-capacity four-client churn it
+then returned `EINVAL` while creating worker 2's file 13,641. Live accounting at
+the failure was 61,658 used inodes and 246,662/262,144 used blocks; after deleting
+every benchmark-created file it still reported 185,021 used blocks and only 17
+used inodes. Frozen controls, after the same smaller-storm A/A workload, returned
+to 16 inodes and 13,164 blocks. After graceful daemon shutdown, both frozen images
+passed `e2fsck -fn` rc 0 at 16 files/13,164 blocks and kernel passed rc 0 at
+16/13,600. The candidate failed rc 4 at 61,658 files/246,662 blocks with block- and
+inode-bitmap differences plus wrong free-block counts in every group. Ordering and
+tie-breaking are therefore not isomorphic: concurrent request execution can race
+ext4 allocation/free and durable-summary publication even though individual
+requests and replies are unchanged. Floating point and RNG are N/A.
+
+Strict-remote `cargo check -p ffs-fuse --all-targets` passed on `ovh-b`, job
+`j-29943190916169857`; strict-remote release CLI build passed on `vmi1153651`, job
+`j-29943190916169856`; targeted nightly rustfmt and `git diff --check` passed before
+measurement. Retry only when a mounted concurrency oracle proves linearizable
+ext4 block/inode allocation, free, and durable-summary publication across concurrent
+FUSE requests, and a fresh four-client 64,000-file create/delete cycle repeated at
+least 15 times returns to the frozen control's inode/block counts with every image
+passing `e2fsck -fn` rc 0. The same retry must also obtain an interleaved kernel
+comparator below 5% CV. Until all parts hold, shared-channel multiloop dispatch is
+ledger-CLOSED.
+
 ## Ext4 fsync deferred-summary durability boundary - 2026-07-22 (KEEP correctness; perf-neutral; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
 
 Status: KEEP as a required ext4 durability-boundary repair. The unchanged-directory
