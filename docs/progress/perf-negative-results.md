@@ -3073,3 +3073,78 @@ the three validity gates, a contiguous-partition raw floor, and a dio-loop kerne
 Open adjacent surfaces this audit does NOT cover: the FUSE-mounted multi-file read path
 (`bd-zvn7r`(b) per-chunk destination question) and rayon-under-CPU-contention scheduling
 sensitivity (new observation above; a per-request dispatch comparator would isolate it).
+
+## 2026-07-22 — FUSE-MOUNTED multi-file read gap ISOLATED for the first time + per-thread-read-fd lever REJECTED (bd-kdmu4 / bd-zvn7r(b), cc)
+
+Continuation of the same-day premise audit above, moving to the one read surface it did not
+cover: the real FUSE mount. Subject binary: Jul-13 `release` ffs-cli (baseline arm), then a
+locally-built same-source binary for the lever A/B (env-toggled, same binary both arms).
+Fixture: `/data/tmp/kdmu4_big.img` (2048 x 512 KiB = 1 GiB). Reader: the audited pthread C
+tree reader (contiguous partition, T=16, 128 KiB), identity-gated (XOR64
+`6136f5eaeccd58af` in EVERY run below, including through the full FUSE stack).
+AppArmor gotcha recorded: Ubuntu's `fusermount3` profile only permits mounts under
+`$HOME`/`/mnt`/`/media`/`/tmp`/`/run/user` — mounting at `/data/...` fails EPERM even via
+sudo; use `/mnt/*`.
+
+### The mounted gap (kernel arm = dio-loop ext4, same reader)
+
+| regime | ffs FUSE | kernel | ratio |
+| --- | --- | --- | --- |
+| cold (drop_caches) | 1282–1689 ms | 232–241 ms | **5.5–7.0x slower** |
+| daemon-warm (all image bytes page-cached, FUSE pages cold) | 596–1328 ms | n/a (no daemon) | **disk-free path is ~0.6–1.3 s for 1 GiB** |
+| fully warm | 117 ms | 29–90 ms | measures kernel FUSE page cache, not the daemon |
+
+The in-process engine is at kernel parity (entry above); **the mounted path is where the
+multi-file read gap actually lives, and it is larger than the retired 2.9–5x headline.**
+Daemon-warm ≈ cold shows the path is not disk-bound.
+
+### Profile attribution (perf -g on the daemon, daemon-warm storm, 12.3k samples/8 s)
+
+* `native_queued_spin_lock_slowpath` **41%** — `__filemap_add_folio` ← `page_cache_ra` ←
+  `ext4_file_read_iter` ← `preadv` on the image file: the KNOWN shared-`struct file`
+  readahead/`xa_lock` convoy (single `Arc<File>` in `FileByteDevice`, 16 `ffs-read-*`
+  threads).
+* `_copy_to_iter` **1.83%**, `__pi_memcpy` **1.50%** — **the copy tax is ~3% of daemon
+  self-time on the mounted path.** The "~2x structural pread copy-tax / 41% of read time"
+  framing is dead on this surface too; an mmap-backed ByteDevice has nothing to remove.
+* ~12.3k samples / 8 s across 82 threads ≈ **~1.5 CPUs busy: the daemon is mostly idle.**
+  Wall is bounded by FUSE round-trip/dispatch concurrency, not by daemon CPU and not by
+  copies.
+
+### The lever tried (one lever): per-thread re-opened read fds in `FileByteDevice` — REJECT
+
+Rationale: the profiled 41% spin is the exact pathology the 2026-07-10 raw-harness rows
+measured per-thread fds fixing (insertions 5.9x down, wall 1.41x at T=8) — but those same
+rows also warned "per-thread fd cuts insertions 4.2x and buys no wall (p=0.18)" once the
+fan-out is capped. Implemented safely (thread_local HashMap keyed by device id, re-open
+verified against open-time `(st_dev, st_ino)`, reads only, `FFS_PER_THREAD_READ_FD=0`
+kill-switch for same-binary A/B), built locally, measured 3 interleaved mount-cycle reps:
+
+| arm | off (shared fd) | on (per-thread fds) | verdict |
+| --- | --- | --- | --- |
+| FUSE cold | 1281.7 ms (min 1257.6) | 1363.8 ms (min 1319.1) | **~6% REGRESSION** |
+| FUSE daemon-warm | 596.2 ms (min 590.4) | 660.3 ms (min 635.7) | **~11% REGRESSION** |
+| in-process walk cold | 221.3 ms | 219.4 ms | neutral (1.01x) |
+
+Identity: XOR64 equal in all arms. **REJECT — the spin is overlapped CPU burn, not wall,
+exactly as the 07-10 "insertion count is a lock-wait lever only" row predicted; the extra
+re-opens/fstat and doubled readahead streams cost more than the convoy they remove.**
+Production hunk STASHED (not landed): `stash@{0}` "bd-kdmu4 REJECTED lever: per-thread
+read fds in FileByteDevice". The Jul-13 baseline binary was restored to `target/release`.
+(Remote `cargo test -p ffs-block` on the lever tree also caught a test-module struct
+literal needing the new fields — moot post-stash, but it re-confirms the update-all-
+constructors rule.)
+
+### Retry predicate / the actual next levers (measured surface, unworked)
+
+Do NOT retry: per-thread/dup'd read fds for wall (twice-refuted), mmap/O_DIRECT on any
+read surface (copy ~3% here, bypass 1.00x there), or insertion-count-driven levers.
+The mounted read gap is a **round-trip/dispatch-concurrency** problem. Next levers, in
+suspected order: (1) FUSE request sizing — verify negotiated `max_read`/`max_readahead`
+and the per-request size the daemon actually serves (8192 x 128 KiB requests at ~73 us
+effective each); (2) `--runtime-mode per-core` (thread-per-core dispatcher, shipped
+opt-in, never A/B'd on this workload); (3) daemon-side readahead/prefetch depth on the
+mounted path (OliveCliff's bounded readahead machinery exists); (4) FUSE passthrough is
+NOT applicable (no per-file backing fd for image-embedded files). Each needs the same
+identity-gated C-reader A/B on a quiet box (1-min load < ~16 here; this session ran at
+9–33 with one storm to 54 — mount-cycle interleaving kept arms comparable).
