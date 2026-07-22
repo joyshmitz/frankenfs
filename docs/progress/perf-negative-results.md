@@ -3253,3 +3253,47 @@ value; T=1 is a minor real-world surface), and multi-queue /dev/fuse (clone_fd) 
 loop ever saturates. Next turn switches vein per the alien-graveyard mandate (still
 read-lane: a different primitive class, not more dispatch tuning). mmap/O_DIRECT remain
 closed everywhere (copies ~3% of daemon self-time; bypass 1.00x).
+
+## 2026-07-22 — NEUTRAL-REJECT: daemon-side async next-window prefetch is redundant with kernel image-file readahead (bd-kdmu4, cc)
+
+Vein-switch lever after the dispatch-vein closure. Target: the measured T=1 "pipeline
+bubble" (serial window fetch at every readahead boundary; request coalescing previously
+proven present-but-flat). Implemented double-buffered prefetch: on a predicted-stream
+miss, `read_with_readahead` background-fetches the FOLLOWING 256 KiB window on the
+`read_offload` pool (in-flight dedup set in `ReadaheadManager`, snapshot-scoped
+`ops.read`, no `access_predictor` feedback, RO-non-writeback mounts only — a background
+insert on a writable mount could race `invalidate_inode` and re-cache pre-write bytes).
+Env `FFS_FUSE_ASYNC_PREFETCH` for same-binary A/B.
+
+### Measurement (4 interleaved mount-cycle reps, 1 GiB fixture, box load noisy — one
+~2 s outlier per arm, cv 14–24%; min-of-4 is the robust stat)
+
+| arm | prefetch off | prefetch on | verdict |
+| --- | --- | --- | --- |
+| T=1 cold | min 1324.5 ms (med 1511.6) | min 1331.4 ms (med 1350.3) | **PARITY at min** |
+| T=16 cold | min 366.0 ms | min 355.6 ms | within noise (~3%) |
+
+Identity XOR64 held in every run.
+
+### Why it cannot win (the insight worth keeping)
+
+`FileByteDevice` opens the image with `POSIX_FADV_SEQUENTIAL`; the daemon's window
+fetches are near-sequential preads of the image file, so the KERNEL's own readahead on
+the image file already pipelines the next windows into the page cache ahead of the
+daemon. The "boundary stall" is a page-cache hit (~100 us), not a device read — there is
+almost nothing for daemon-side prefetch to hide. Daemon-level prefetch duplicates
+kernel-level prefetch one layer down. Production hunk STASHED (`stash@{0}`,
+"async next-window prefetch"). Retry predicate: only if the image-file read path ever
+loses kernel readahead (O_DIRECT backend, network/blob backend, or `FFS_READ_FADVISE=random`),
+where a daemon-side window pipeline would be the only prefetch layer — measure there first.
+
+### Lane status after this turn
+
+Mounted multi-file: **1.43x cold** (session start 5.5x), loop unsaturated, dispatch +
+config + prefetch veins all closed with numbers. In-process: kernel parity. T=1
+single-stream: bounded by per-request service time under an already-pipelined backend;
+no cheap lever identified. Consecutive non-KEEPs in this vein: 1 (this entry). Next
+fresh vein candidates (unmeasured surfaces, per campaign lesson that un-benched spots
+still yield): `bd-vpypn` extent walks at HIGH extent counts (never measured, both
+sequential and random); mounted metadata-storm surfaces (statfs/xattr through FUSE).
+mmap/O_DIRECT stay closed everywhere.
