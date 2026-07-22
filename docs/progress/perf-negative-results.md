@@ -13,6 +13,64 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Ext4 fsync deferred-summary durability boundary - 2026-07-22 (KEEP correctness; perf-neutral; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
+
+Status: KEEP as a required ext4 durability-boundary repair. The unchanged-directory
+hot path is performance-neutral within the same-worker A/A null; this is not claimed
+as another speedup.
+
+Profile and conformance first: after the durable-watermark scan KEEP, the mounted
+8,000-file unchanged-directory workload still spent 7.710211 seconds in 10,000
+`fsyncdir` calls. A server-side cycles profile captured 1,870 samples with zero loss,
+with the stripped release binary's leading sync-path address cluster holding 18.94%.
+The mandatory post-profile mounted check then supplied stronger negative evidence:
+both frozen controls and the candidate returned `e2fsck -fn` rc 4 with identical stale
+inode/block bitmaps, free counts, checksums, and group summaries, while kernel ext4 was
+clean. Ledger and recent-log grep showed that deferred GDT persistence is default-on
+and is required at durability boundaries; its recorded retry predicate now held because
+mounted FUSE and exact offline fsck reproduction were available. Source attribution
+found that FUSE `ext4_sync_with_logging` flushed MVCC versions and synced the device but
+never persisted the derived group descriptors or superblock free totals. It also
+published the MVCC cursor before the caller's device sync, contrary to its retry
+contract. No closed FIFO slab, Bloom prefilter, DenseVisited, or write-ownership family
+was retried.
+
+The kept boundary now holds the durable-cursor mutex while it flushes versions, clears
+the writable descriptor cache, persists group descriptors and superblock free totals
+when any version was flushed, and syncs the device. Only after every step succeeds does
+it publish `durable_through`; any error leaves the old cursor so retry rewrites the full
+suffix and its derived summaries. When `flushed == 0`, the new summary writes remain
+skipped, preserving the no-op watermark fast path. Ordering preserved: the original
+sorted/coalesced block writes are unchanged, followed by their required derived ext4
+summaries and the existing device sync. Tie-breaking unchanged: newest-visible MVCC
+selection is unchanged. Floating point and RNG: N/A.
+
+The decisive pinned, rotating, same-worker A/A/B/kernel run used fresh clones and 30
+samples per arm, each the median of three 2,000-call unchanged-directory `fsyncdir`
+batches after an exact 8,000 x 128-byte durable warmup:
+
+- frozen-pre control A: 819.529760 ms, CV 1.274955%
+- frozen-pre control B: 818.145700 ms, CV 1.410293%
+- candidate: 819.617904 ms, CV 0.947339%
+- kernel ext4: 2.200209 ms, CV 2.905261%
+
+Candidate/pre-control-pool is 1.000953x (0.0953% slower), inside the 1.001692x
+(0.1692%) A/A null spread: performance-neutral. Candidate remains 372.518x slower than
+kernel on this synchronous FUSE transport shape. Frozen/candidate binary SHA-256 values
+were respectively
+`5400b53171a337b1189657204f7728af08073bfcf1464de8e61593d9dfce02cb` and
+`2918b6450ab97421e70b246776d5759de854ac4180d7988058e9ccd9d1788cf1`.
+
+Behavior proof was exact. Every arm had 8,000 files, 1,024,000 payload bytes, and three
+matching sentinels. After daemon-only graceful SIGINT, both frozen images reproduced rc
+4 and their original 270-file/2,357-block summary; candidate passed `e2fsck -fn` rc 0
+with 8,271 files/10,406 blocks, and kernel passed rc 0 with 8,271 files/10,403 blocks.
+An independent fresh candidate clone also passed rc 0 with 8,271 files/10,406 blocks.
+The focused default-on/checksum-on fsync-summary test passed 1/1 on strict-remote
+`vmi1153651`, job `j-29943190916169812`; the release CLI build passed on strict-remote
+`vmi1227854`, job `j-29943190916169818`. Targeted nightly rustfmt and
+`git diff --check` passed.
+
 ## Durable-watermark no-op checkpoint scan guard - 2026-07-22 (KEEP; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
 
 Status: KEEP for the narrow MVCC checkpoint primitive. The mounted ext4 mutation

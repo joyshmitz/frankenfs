@@ -26784,12 +26784,21 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
 
-        // Flush committed MVCC block versions to the underlying device so
-        // that data written through the MVCC store becomes durable on disk.
+        // Keep the durable cursor private until the complete ext4 durability
+        // boundary succeeds. In particular, default-on deferred GDT
+        // persistence and the superblock free totals are derived from the
+        // just-flushed bitmap versions; publishing the cursor before those
+        // writes (or before device sync) would make a retry skip the versions
+        // that still need a consistent on-disk summary.
         let base_dev = self.direct_block_device_adapter();
-        let flushed = self.flush_mvcc_versions_to_device(cx, &base_dev)?;
+        let mut flushed_through = self.mvcc_flushed_through.lock();
+        let (flushed, durable_through) =
+            self.mvcc_store
+                .flush_to_device_after(cx, &base_dev, *flushed_through)?;
         self.clear_ext4_writable_group_desc_cache();
         if flushed > 0 {
+            self.ext4_flush_group_descriptors(cx)?;
+            self.ext4_sync_superblock_free_totals(cx)?;
             trace!(
                 target: "ffs::ext4::rw",
                 operation_id = %operation_id,
@@ -26803,6 +26812,7 @@ impl OpenFs {
             .unwrap_or(0);
         match self.dev.sync(cx) {
             Ok(()) => {
+                *flushed_through = (*flushed_through).max(durable_through);
                 info!(
                     target: "ffs::ext4::rw",
                     operation_id = %operation_id,
@@ -67141,6 +67151,41 @@ mod tests {
             assert!(
                 clean,
                 "e2fsck must accept after sb free-total sync (with_csum={with_csum}):\n{output}"
+            );
+        }
+    }
+
+    /// A successful FUSE-style fsync is itself a complete durability boundary:
+    /// under default-on GDT deferral it must persist the derived descriptor and
+    /// superblock summaries before publishing the MVCC durable watermark.
+    #[test]
+    fn fsync_persists_deferred_ext4_summaries_e2fsck_clean() {
+        for with_csum in [false, true] {
+            let Some((fs, dev, _tmp, image)) = open_ext4_mke2fs(8, with_csum) else {
+                continue;
+            };
+            let cx = Cx::for_testing();
+            let attr = fs
+                .create(
+                    &cx,
+                    InodeNumber(2),
+                    OsStr::new("fsync-summary.bin"),
+                    0o644,
+                    0,
+                    0,
+                )
+                .expect("create");
+            fs.write(&cx, attr.ino, 0, &[0x5A_u8; 6 * 1024])
+                .expect("write");
+            fs.fsync(&cx, attr.ino, 0, false).expect("fsync");
+
+            std::fs::write(&image, dev.snapshot_bytes()).expect("write image");
+            let Some((clean, output)) = run_e2fsck(&image) else {
+                continue;
+            };
+            assert!(
+                clean,
+                "e2fsck must accept after fsync (with_csum={with_csum}):\n{output}"
             );
         }
     }
