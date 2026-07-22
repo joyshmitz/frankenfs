@@ -3297,3 +3297,58 @@ fresh vein candidates (unmeasured surfaces, per campaign lesson that un-benched 
 still yield): `bd-vpypn` extent walks at HIGH extent counts (never measured, both
 sequential and random); mounted metadata-storm surfaces (statfs/xattr through FUSE).
 mmap/O_DIRECT stay closed everywhere.
+
+## 2026-07-22 — KEEP: ExtentCache batch eviction — warm 8192-extent read 2.44x faster, cold 1.80x (bd-vpypn / bd-kdmu4, cc)
+
+The bd-vpypn regime ("extent behavior at hundreds-to-thousands of extents was never
+measured") finally measured — and it hid the predicted scan gap.
+
+### Fixture (new, reproducible)
+
+`/data/tmp/kdmu4_frag.img`: `/d/frag.bin` = 64 MiB with **8192 single-block extents**
+(alternating 4 KiB hole-punch via fallocate on a loop mount; filefrag -v verified;
+note filefrag's summary line lies — trust `-v`), plus `/d/contig.bin` 64 MiB
+contiguous control. e2fsck-clean.
+
+### The gap and the mechanism
+
+`ffs-cli read` warm: frag 161.6 ms vs contig 17.2 ms = **9.4x** while the kernel's
+frag/contig warm ratio is 1.04x. Symbolized profile (release + debuginfo env
+overrides): `ExtentCache::insert` 21.7% + BTree `search_tree` 14.1% + BTree
+`Iter::next`/`next_kv`/`next_leaf_edge` 18.8% ≈ **57% of the read**. Cause:
+`evict_lru_except` did a full-shard BTreeMap scan per insert (`min_by_key`), and one
+inode's mappings all land in ONE shard (capacity 1024) — a >capacity extent stream
+makes every insert O(shard), i.e. quadratic. (This is the true cost behind the
+2026-07-16 fleet-blocked `insert_batch` stash, which chased the LOCK, not the scan.)
+
+### Lever (one lever, `crates/ffs-extent/src/lib.rs`)
+
+Batch eviction: one scan selects the `max(1, capacity/8)` LRU victims via
+`select_nth_unstable_by_key` on the exact historical `(last_access, key)` ordering,
+amortizing eviction to O(len/batch) per insert. `FFS_EXTENT_EVICT_BATCH=1` restores
+the historical single-victim behavior (same-binary A/B); with batch=1 the victim is
+IDENTICAL to the old `min_by_key`, tie-break included, so capacities <16 — including
+both eviction unit tests — keep exact historical semantics. Eviction choice never
+affects returned mappings, only what must be re-resolved from the authoritative tree.
+
+### Measurement (same binary, env-toggled, interleaved, 5 reps + 7-rep contig guard)
+
+| surface | single (incumbent) | batch | ratio |
+| --- | --- | --- | --- |
+| warm frag (pure CPU) | 210.5 ms (cv 3.6%) | **86.2 ms** (cv 6.5%) | **2.44x** |
+| cold frag | 249.6 ms (cv 8.5%) | **139.0 ms** (cv 14.4%) | **1.80x** |
+| warm contig guard | 17.3 ms | 17.4 ms | parity (eviction never fires) |
+
+Identity: sha256 of full frag.bin bytes identical single-vs-batch AND equal to the
+kernel loop-mount sha (`5fb93b1c…`). `cargo test -p ffs-extent` remote: **154/0**.
+rustfmt clean; ubs 0 critical.
+
+### Residual + next levers on this surface
+
+Warm frag (86 ms) is still ~5x contig: the shard (cap 1024) cannot hold 8192 mappings,
+so the stream still thrashes (miss → tree re-walk → insert → batch-evict cycle).
+Candidates: don't cache a leaf's mappings when the namespace's mapping count exceeds
+shard capacity (cache the LEAF page instead / rely on the arc_swap extent map);
+per-namespace capacity awareness; or a direct extent-map path for >capacity files.
+Also note `ffs-cli read` duration includes ~13 ms fixed CLI startup — ratios above are
+end-to-end and thus conservative.
