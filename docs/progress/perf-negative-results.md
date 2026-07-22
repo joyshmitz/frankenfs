@@ -2989,3 +2989,87 @@ independently-revertible steps, per-step `e2fsck -fn` gates, crash-consistency, 
 proof section. My independent **7/7** verification stands as its second-agent peer review. Editing it would
 collide and non-src edits revert within minutes — so I did not. The plan is sign-off-ready and de-risked by
 two agents; the FS-mutating cutover remains cod's.
+
+## 2026-07-22 — bd-kdmu4 PREMISE AUDIT: the 2.9–5x multi-file parallel-read headline is DEAD on current code — measured at KERNEL PARITY OR BETTER (cc)
+
+The 2026-07-10 closeout left `bd-kdmu4` "RESOLVED on O_DIRECT (1.00x); its 2.9x multi-file
+premise UNAUDITED" and prescribed an audit against the identity / magnitude / impossibility
+validity gates. This entry is that audit. **Verdict: the premise no longer holds.**
+
+### Premise under test
+
+"Multi-file parallel read (256 files x 256 KiB, `walk --read-data --parallel`) is ~2.9–5x
+slower than an in-process threaded C reader; 41% pread copy tax + 27% nested-rayon
+coordination" (2026-06-22, CrimsonFox). Since then the gap was engineered away lever by
+lever: `bd-2x68s` per-worker walk buffer reuse + 3.2x multi-file walk win, the 32-block
+read-chunk retune, `21113a70` build_global(16) walk cap, `7a6091a2` 16-wide read pool, and
+the 2026-07-16 fan-out-cap class (`9af088db`/`650fc5a9`/`ffd672ee`).
+
+### Method
+
+* **Subject:** `target/release/ffs-cli` (Jul 13, opt-z baseline-ISA `release` profile,
+  contains `21113a70`'s x16 walk cap — every run printed `[parallel x16]`; predates the
+  Jul-16 caps, which do not trigger on this workload). Engine time from the `walked … in Xms`
+  line (excludes image open, includes parallel readdir+getattr+full data read).
+* **Fixtures (fresh, purpose-built):** `/data/tmp/kdmu4_small.img` = exact premise replica,
+  256 files x 256 KiB = 64 MiB in 16 dirs; `/data/tmp/kdmu4_big.img` = honest-size variant
+  per the >=1 GiB sizing rule, 2048 files x 512 KiB = 1 GiB in 32 dirs. mke2fs -b4096 -d;
+  all files single-extent (filefrag-verified).
+* **Kernel arm:** in-process pthread C reader (`reader.c tree`), per-file open (own `f_ra`),
+  contiguous per-thread file partition, 128 KiB pread chunks, readdir+lstat walk inside the
+  timed region — on a **`--direct-io=on` loop mount** (dio=1 verified) per the recorded
+  loop-dio methodology.
+* **Floor arm:** same C harness in `ranges` mode: raw parallel pread of the files' physical
+  extents from the image file, per-thread fd, contiguous partition. First floor build used
+  atomic round-robin dispatch and FAILED the impossibility gate (ffs 225.5 ms < "floor"
+  243.3 ms cold-1GiB) because round-robin destroys per-fd sequentiality while rayon gives
+  each worker a contiguous span — the floor was rebuilt with contiguous partitioning and
+  the gate then passed everywhere (e.g. cold-1GiB floor 200–212 ms < ffs 210–229 ms).
+* **Gates:** identity — all three arms XOR64-identical per fixture (`46d5e61487c25876` /
+  `6136f5eaeccd58af`, byte counts exact 67,108,864 / 1,073,741,824) + `ffs-cli read`
+  sha256 == kernel-mount sha256 on sample files; magnitude — file/byte counts exact in every
+  arm; impossibility — fixed floor below subject in every cell. `sync && drop_caches=3`
+  before every cold arm, arms interleaved within each rep, 7 reps, medians + min + cv.
+
+### Results (campaign 1, quiet box — 15-min load avg ~9; T=16 all arms)
+
+| fixture / mode | ffs engine | kernel C reader (dio loop) | raw floor (fixed) | verdict |
+| --- | --- | --- | --- | --- |
+| 64 MiB premise replica, cold | **17.6 ms** (cv 2.1–3.2%) | 18.7 ms (cv 2.2%) | 13.7 ms | **ffs 1.06x FASTER** |
+| 64 MiB premise replica, warm | 4.4–5.1 ms | 4.2–4.5 ms (cv 12–19%) | 2.3–2.9 ms | parity (<=1.2x within noise) |
+| 1 GiB honest-size, cold | **225.5 ms** (cv 1.1%) | 244.6 ms (cv 0.7%) | 200–212 ms | **ffs 1.08x FASTER** |
+| 1 GiB honest-size, warm | **29.7 ms** (cv 3.5%) | 33.5 ms (cv 3.2%) | 26.2 ms | **ffs 1.13x FASTER** |
+
+Kernel-best sweep (T in {8,16,32}, min-of-3): best kernel cold anywhere = 17.8 ms (64 MiB)
+/ 229.4 ms (1 GiB); against ffs's worst clean medians that is still **1.00–1.01x = parity**.
+Conservative worst-vs-best framing does not resurrect any gap, and the opt-z baseline-ISA
+subject binary only understates the v3+PGO production build.
+
+### Load-storm replication (campaign 2) — the "needs low-load window" caveat is real
+
+A 1-min load-avg spike to ~54 (sibling agents) landed mid-campaign-2. Cold verdicts
+reproduced under load (ffs 1.03–1.09x faster than the kernel arm, cv 9–14%), but warm-1GiB
+inverted: ffs 119–200 ms vs C reader 40–69 ms — **under CPU contention the rayon walk
+degrades ~4x while the plain pthread reader degrades ~1.5x.** Campaign 1 is the valid
+dataset; the load observation matches the bead's recorded "needs low-load window" and is a
+scheduling-sensitivity fact, not a filesystem gap.
+
+### Disposition
+
+* `bd-kdmu4` **CLOSED**: O_DIRECT/mmap resolved earlier at 1.00x (do not approve for
+  latency); the 2.9–5x multi-file premise is now AUDITED and REFUTED on current code —
+  in-process multi-file parallel read is at kernel parity or better, floor-bounded residual
+  headroom <=5–9% cold. The "41% copy tax" attribution died with the workload gap: the floor
+  pays the same buffered copy and ffs sits within 5–9% of it.
+* The mmap-backed / zero-copy ByteDevice lane is **not justified by any remaining measured
+  gap on this surface** — consistent with the standing 1.00x bypass measurement.
+* Reproduction: harness + driver at the session scratchpad (`reader.c`, `bench.py`),
+  fixtures kept at `/data/tmp/kdmu4_{small,big}.img`.
+
+### Retry predicate
+
+Reopen a multi-file in-process read gap ONLY with: a quiet box (1-min load < ~2x cores/4),
+the three validity gates, a contiguous-partition raw floor, and a dio-loop kernel arm.
+Open adjacent surfaces this audit does NOT cover: the FUSE-mounted multi-file read path
+(`bd-zvn7r`(b) per-chunk destination question) and rayon-under-CPU-contention scheduling
+sensitivity (new observation above; a per-request dispatch comparator would isolate it).
