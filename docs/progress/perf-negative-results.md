@@ -3405,3 +3405,49 @@ shard capacity (cache the LEAF page instead / rely on the arc_swap extent map);
 per-namespace capacity awareness; or a direct extent-map path for >capacity files.
 Also note `ffs-cli read` duration includes ~13 ms fixed CLI startup — ratios above are
 end-to-end and thus conservative.
+
+## 2026-07-22 — KEEP #2 on the high-extent regime: publish hot extents for DEEP trees on one-shot reads — warm frag another 2.53x, cold beats the kernel arm (bd-vpypn / bd-kdmu4, cc)
+
+Profile-first on the post-batch-eviction binary: the residual warm-frag cost was still
+~29% in the cache layer, now the per-insert BTreeMap DESCENT (`search_tree` 21.9% +
+`insert` 6.7%) — ~16k lookups/inserts per read (8192 data mappings re-inserted leaf-by-
+leaf plus one single-block HOLE SENTINEL per hole block) into a shard that can never
+hold them.
+
+### Root cause
+
+`OpenFs` already has a lock-free full-map fast path (`ext4_hot_extents`,
+`ArcSwapOption<(ns, Arc<[ExtentMapping]>)>`) that resolves blocks AND holes in-memory
+with zero cache traffic — but its publication was gated on `inode_was_hot`, i.e. never
+for a one-shot full-file read ("a one-shot multi-file read never pays the full-tree
+walk"). For a DEEP extent tree that trade inverts: the "saved" full walk is ~25 leaf
+reads the per-miss path pays leaf-by-leaf anyway, while the un-published read pays the
+16k-op cache storm.
+
+### Lever (one lever, `crates/ffs-core/src/lib.rs`)
+
+Publish also when `ext4_deep_extent_tree(inode)`: root header `depth >= 1` from the
+pure in-inode parse (`parse_inode_extent_tree`), env kill switch
+`FFS_HOT_EXTENTS_DEEP=0`. Depth-0 trees (≤4 inline extents — every small-file-storm
+case) keep the historical one-shot behavior byte-for-byte.
+
+### Measurement (same binary, env-toggled, interleaved, 5 reps)
+
+| surface | off (incumbent) | on (deep publish) | ratio |
+| --- | --- | --- | --- |
+| warm frag 8192-extent | 86.6 ms (cv 3.4%) | **34.2 ms** (cv 6.4%) | **2.53x** |
+| cold frag | 106.5 ms (cv 6.3%) | **59.3 ms** (cv 3.1%) | **1.80x** |
+| warm contig guard | 26.9 ms | 27.2 ms | parity |
+| multi-file storm guard (1 GiB walk) | 229.4 ms | 230.4 ms | parity |
+
+sha256 identity both arms (= kernel loop-mount sha). Targeted `ffs-core` tests
+(extent/hot/resolve/read_file): **125 passed / 0 failed** remote. rustfmt clean.
+
+### Stacked session result on this regime (fixture `/data/tmp/kdmu4_frag.img`)
+
+warm frag: 161.6 → 34.2 ms (**4.7x**, now ~1.26x of contig vs kernel's 1.04x ratio);
+cold frag: 184.4 → 59.3 ms (**3.1x**) — and the cold fragmented read now lands BELOW
+the dio-loop kernel arm's 75.0 ms on the same fixture (different I/O path — direct
+image pread vs loop — so stated as arm-vs-arm, not "faster than kernel ext4" absolute).
+Remaining residual vs contig (~7 ms warm) is the per-segment assembly of 8192
+one-block extents + hole memset; no cheap lever identified — diminishing returns.
