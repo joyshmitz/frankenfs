@@ -3148,3 +3148,55 @@ mounted path (OliveCliff's bounded readahead machinery exists); (4) FUSE passthr
 NOT applicable (no per-file backing fd for image-embedded files). Each needs the same
 identity-gated C-reader A/B on a quiet box (1-min load < ~16 here; this session ran at
 9–33 with one storm to 54 — mount-cycle interleaving kept arms comparable).
+
+## 2026-07-22 — KEEP: async per-request read dispatch on the FUSE mount — cold multi-file 3.85x faster, gap vs kernel 5.5x → 1.43x (bd-kdmu4, cc)
+
+The turn-2 entry above attributed the mounted multi-file read gap to serial request
+dispatch: `fuser::spawn_mount2` runs ONE session loop, the `Filesystem::read` op replied
+inline, so 16 concurrent client readers were served strictly one-at-a-time (daemon ~1.5
+CPUs busy, copies ~3%). This turn landed the bead's own prescribed "per-request dispatch
+model" for the read op.
+
+### The lever (one lever, src-only, `crates/ffs-fuse/src/lib.rs`)
+
+`FuseInner` gains a dedicated `read_offload` rayon pool (sized by the existing
+`thread_count` knob that already sizes `max_background`; named `ffs-fuse-rd-*`).
+`Filesystem::read` now moves `(shared_handle, params, ReplyData)` onto that pool and
+returns immediately — the session loop fetches the next kernel request while workers
+serve and reply concurrently. The serve body is the exact former inline body
+(`serve_read_request`), so bytes/errors/metrics are unchanged; fuser's `ReplySender` is
+`Send + Sync + 'static` by design for cross-thread replies, and FUSE imposes no
+reply-ordering requirement across requests. Kill switch: `FFS_FUSE_ASYNC_READ=0` forces
+the inline pre-lever path (same-binary A/B); the pool also degrades to inline when it
+cannot be built or `thread_count < 2`.
+
+### Measurement (same binary, env-toggled, 4 interleaved mount-cycle reps, T=16 C reader, 1 GiB / 2048 files, quiet box load ~8)
+
+| regime | inline (off) | dispatched (on) | ratio |
+| --- | --- | --- | --- |
+| cold (drop_caches) | 1327.5 ms (cv 1.8%) | **345.1 ms** (cv 3.8%) | **3.85x faster** |
+| daemon-warm | 658.3 ms (cv 2.5%) | **244.3 ms** (cv 5.9%) | **2.69x faster** |
+| vs kernel (dio-loop ext4, same session: 242.0 ms median cold) | 5.5x slower | **1.43x slower** | — |
+
+Marginal cost, reported honestly: single-stream T=1 cold medians 1148 ms (off) vs 1207 ms
+(on) over 3 interleaved reps with overlapping ranges (~5%, per-request handoff cost).
+Accepted against the 3.85x multi-stream win; the T=1 surface has its own open lever
+(daemon readahead depth).
+
+### Behavior proof
+
+* Identity: XOR64 `6136f5eaeccd58af` in every off/on run of every regime (16 A/B runs +
+  T=1 runs), byte-identical through the full FUSE stack.
+* `cargo test -p ffs-fuse` (remote): **573 passed / 0 failed**.
+* Ordering preserved: per-request bytes identical; FUSE has no cross-request reply
+  ordering contract. Tie-breaking/floating-point/RNG: N/A. The pre-existing
+  `fuse_inner_shared_across_threads` test already models concurrent dispatch.
+* ubs on the file: 19 criticals, all pre-existing whole-file heuristics (test panics,
+  token-compare false positives), none in the changed hunks.
+
+### Follow-ups (open, this lane)
+
+Residual mounted gap is 1.43x cold: next levers are daemon-side readahead depth for the
+single-stream path, offloading `readdir`/`getattr` the same way (metadata storms), and
+the negotiated `max_readahead` audit. The rejected per-thread-fd stash and the mmap/
+O_DIRECT closures are unaffected by this change.

@@ -1271,6 +1271,51 @@ struct FuseInner {
     access_predictor: AccessPredictor,
     readahead: ReadaheadManager,
     inode_locks: Arc<FuseInodeLocks>,
+    /// Dedicated pool that `read` requests are dispatched onto so the single
+    /// fuser session loop can immediately fetch the next kernel request
+    /// instead of serving reads one-at-a-time. The mounted multi-file read
+    /// storm profiled the daemon at ~1.5 busy CPUs with wall bounded by this
+    /// serial dispatch (2026-07-22 ledger entry), which is exactly the
+    /// "per-request dispatch model" bd-kdmu4 calls for. `None` when disabled
+    /// (`FFS_FUSE_ASYNC_READ=0`) or when only one worker thread is resolved —
+    /// reads then reply inline on the session loop, the pre-lever behavior.
+    read_offload: Option<rayon::ThreadPool>,
+}
+
+/// Whether `read` requests are dispatched onto the offload pool (default on).
+/// Set `FFS_FUSE_ASYNC_READ=0` (or `off`) to reply inline on the session loop —
+/// the pre-lever behavior — so the lever can be A/B'd in one binary.
+fn fuse_async_read_enabled() -> bool {
+    use std::sync::OnceLock;
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| {
+        !matches!(
+            std::env::var("FFS_FUSE_ASYNC_READ")
+                .ok()
+                .as_deref()
+                .map(str::trim),
+            Some("0" | "off" | "false")
+        )
+    })
+}
+
+/// Build the `read`-request offload pool: `thread_count` dedicated threads
+/// (the same knob that already sizes `max_background`). Returns `None` when
+/// the lever is disabled or the pool cannot be built — callers then reply
+/// inline, which is always correct.
+fn build_read_offload_pool(thread_count: usize) -> Option<rayon::ThreadPool> {
+    if !fuse_async_read_enabled() || thread_count < 2 {
+        return None;
+    }
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .thread_name(|i| format!("ffs-fuse-rd-{i}"))
+        .build()
+        .map_err(|error| {
+            warn!(%error, "read offload pool build failed; reads reply inline");
+            error
+        })
+        .ok()
 }
 
 impl std::fmt::Debug for FuseInner {
@@ -2032,6 +2077,7 @@ impl FrankenFuse {
                 access_predictor: AccessPredictor::default(),
                 readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
                 inode_locks: Arc::new(FuseInodeLocks::default()),
+                read_offload: build_read_offload_pool(thread_count),
             }),
         }
     }
@@ -2090,6 +2136,33 @@ impl FrankenFuse {
     fn shared_handle(&self) -> Self {
         Self {
             inner: Arc::clone(&self.inner),
+        }
+    }
+
+    /// Serve one FUSE `read` request and send its reply. Runs either inline on
+    /// the session loop (offload disabled) or on the `read_offload` pool; the
+    /// body is identical in both cases — the exact code the inline `read` op
+    /// ran before the dispatch lever.
+    fn serve_read_request(&self, ino: u64, fh: u64, byte_offset: u64, size: u32, reply: ReplyData) {
+        let cx = Self::cx_for_request();
+        match self.read_with_readahead(&cx, InodeNumber(ino), fh, byte_offset, size) {
+            Ok(data) => {
+                self.inner
+                    .metrics
+                    .record_bytes_read(u64::try_from(data.len()).unwrap_or(u64::MAX));
+                reply.data(&data);
+            }
+            Err(e) => {
+                Self::reply_error_data(
+                    &FuseErrorContext {
+                        error: &e,
+                        operation: "read",
+                        ino,
+                        offset: Some(byte_offset),
+                    },
+                    reply,
+                );
+            }
         }
     }
 
@@ -5909,30 +5982,24 @@ impl Filesystem for FrankenFuse {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let cx = Self::cx_for_request();
         let Ok(byte_offset) = u64::try_from(offset) else {
             warn!(ino, offset, "read: negative offset");
             reply.error(libc::EINVAL);
             return;
         };
-        match self.read_with_readahead(&cx, InodeNumber(ino), fh, byte_offset, size) {
-            Ok(data) => {
-                self.inner
-                    .metrics
-                    .record_bytes_read(u64::try_from(data.len()).unwrap_or(u64::MAX));
-                reply.data(&data);
-            }
-            Err(e) => {
-                Self::reply_error_data(
-                    &FuseErrorContext {
-                        error: &e,
-                        operation: "read",
-                        ino,
-                        offset: Some(byte_offset),
-                    },
-                    reply,
-                );
-            }
+        // Dispatch the read onto the offload pool so this single session loop
+        // can immediately fetch the next kernel request. Every structure the
+        // handler touches lives behind `Arc<FuseInner>` (`read_with_readahead`
+        // takes `&self`), the fuser reply owns a `Send` channel sender built
+        // for exactly this cross-thread reply pattern, and FUSE imposes no
+        // reply-ordering requirement across concurrent requests. Bytes,
+        // errors, and metrics are identical to the inline path — only the
+        // thread that executes them changes.
+        if let Some(pool) = &self.inner.read_offload {
+            let handle = self.shared_handle();
+            pool.spawn(move || handle.serve_read_request(ino, fh, byte_offset, size, reply));
+        } else {
+            self.serve_read_request(ino, fh, byte_offset, size, reply);
         }
     }
 
@@ -18080,6 +18147,7 @@ mod tests {
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(MAX_PENDING_READAHEAD_ENTRIES),
             inode_locks: Arc::new(FuseInodeLocks::default()),
+            read_offload: None,
         });
         let barrier = Arc::new(std::sync::Barrier::new(10));
 
@@ -19442,6 +19510,7 @@ CUSTOM("congestion_threshold=3")"#;
             access_predictor: AccessPredictor::default(),
             readahead: ReadaheadManager::new(8),
             inode_locks: Arc::new(FuseInodeLocks::default()),
+            read_offload: None,
         };
         let dbg = format!("{inner:?}");
         assert_eq!(dbg, FUSE_INNER_DEBUG_GOLDEN);
