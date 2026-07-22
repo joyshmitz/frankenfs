@@ -3469,6 +3469,9 @@ impl MvccStore {
         flushed_through: CommitSeq,
     ) -> FfsResult<(usize, CommitSeq)> {
         let snapshot = self.current_snapshot();
+        if snapshot.high <= flushed_through {
+            return Ok((0, snapshot.high));
+        }
         let mut flushed = 0usize;
 
         // `versions` is an FxHashMap (bd-mvccmap: O(1) commit/read entry vs the

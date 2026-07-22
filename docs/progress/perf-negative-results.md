@@ -13,6 +13,73 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Durable-watermark no-op checkpoint scan guard - 2026-07-22 (KEEP; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
+
+Status: KEEP for the narrow MVCC checkpoint primitive. The mounted ext4 mutation
+conformance gap described below remains open and prevents an end-to-end kernel-parity
+claim.
+
+Profile first: after the incremental durable-watermark KEEP, a frozen-pre mounted image
+with 8,000 warm 128-byte files took 7.710211 seconds for 10,000 unchanged-directory
+`fsyncdir` calls. The server-side cycles profile captured 1,870 samples with zero loss;
+the stripped release binary's leading address cluster held 18.94% of samples. Source
+attribution then found the exact residual: both `MvccStore::flush_to_device_after` and
+`ShardedMvccStore::flush_to_device_after` still traversed every version map even when
+`snapshot.high == flushed_through`, although every visited version must be rejected by
+the watermark predicate. Ledger and recent-log grep found no prior read-side no-op
+checkpoint guard. The `fed3a313` stable-watermark publication null was a different
+SnapshotRegistry write-side atomic, and the closed DenseVisited/write-ownership families
+were not retried.
+
+The kept lever snapshots first and returns `(0, snapshot.high)` when
+`snapshot.high <= flushed_through`. Commit sequences are monotonic, so the stable
+snapshot cannot contain a version newer than the durable cursor in that branch. The old
+scan would therefore reject every entry and issue zero writes. A commit racing after the
+snapshot was already outside the old flush's visibility and remains outside the new one.
+The caller's device `sync` is unchanged. Public full-checkpoint calls still pass sequence
+zero and traverse whenever any committed version exists. Ordering preserved: yes, the
+only skipped branch emits no block run. Tie-breaking unchanged: yes, no visible version
+is selected in that branch. Floating point and RNG: N/A.
+
+The decisive same-worker mounted proof used four clones of the same clean ext4 image and
+froze the pre binary twice as null controls. Every arm was populated outside timing with
+exactly 8,000 x 128-byte files and validated for exact count, byte total, and three
+sentinel payloads before and after timing. Requester and three FUSE daemons were pinned to
+separate CPUs. Thirty rotating samples per arm each took the median of three 2,000-call
+unchanged-directory `fsyncdir` batches:
+
+- frozen-pre control A: 1,018.687532 ms, CV 3.296456%
+- frozen-pre control B: 1,018.529234 ms, CV 3.593459%
+- candidate: 836.161306 ms, CV 3.478875%
+- kernel ext4: 2.401584 ms, CV 2.750562%
+
+Candidate is 1.218101x faster than the faster frozen control (17.905% lower latency),
+comfortably clearing the 1.000155x A/A null spread. The remaining synchronous FUSE
+boundary is still dominant: candidate is 348.171x slower than kernel ext4 for this
+unchanged-directory shape, so this is an internal KEEP rather than a direct kernel win.
+Frozen-pre binary SHA-256 was
+`aff29fdaf03f5de5fb39ea3dfe3af28ad523167334c7da1893d891c797cd1454`;
+candidate was
+`5400b53171a337b1189657204f7728af08073bfcf1464de8e61593d9dfce02cb`;
+source fixture was
+`0de4b44cacb300d71cbf2b1ae1ef3eca7d56668bec25a8a0aad2faaea874c7cb`.
+
+Behavior-isomorphism is exact at the lever boundary. Existing single-store and sharded
+recording-device tests exercise the repeated call and assert zero writes plus the same
+returned watermark; both passed (2/2, strict-remote job `j-29942429901652413`). The
+all-target `ffs-mvcc` check passed on strict-remote `ovh-a` job
+`j-29943190916169800`, and the release CLI build passed on `vmi1227854` job
+`j-29943190916169756`. `git diff --check` passed.
+
+The broader mounted conformance gate exposed an unrelated existing defect and is recorded
+without laundering it: kernel ext4's post-run image passed `e2fsck -fn`, while both
+frozen controls and candidate returned rc 4 with byte-for-byte identical diagnostics
+(stale inode/block bitmaps, free counts, and group-summary metadata). A separate fresh
+candidate clone with daemon-only graceful SIGINT reproduced the same result. Thus the
+candidate neither creates nor hides this corruption, but the parent mounted comparator
+must remain open. A direct kernel durability verdict requires the ext4 mutation path to
+produce an `e2fsck -fn`-clean image for this exact 8,000-file setup first.
+
 ## Incremental MVCC durable-checkpoint watermark - 2026-07-22 (KEEP; bd-opb6l / bd-fsync-journal-latency-gap-ptp4x)
 
 Status: KEEP - mounted small-file durability now beats kernel ext4 on the measured

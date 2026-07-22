@@ -1122,6 +1122,9 @@ impl ShardedMvccStore {
         flushed_through: CommitSeq,
     ) -> FfsResult<(usize, CommitSeq)> {
         let snapshot = self.current_snapshot();
+        if snapshot.high <= flushed_through {
+            return Ok((0, snapshot.high));
+        }
         // Collect visible (block, bytes) across all shards (each under its read lock,
         // briefly), then sort + coalesce + write holding no shard lock.
         let mut items: Vec<(BlockNumber, Vec<u8>)> = Vec::new();
