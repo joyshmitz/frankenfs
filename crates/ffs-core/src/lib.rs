@@ -1277,6 +1277,10 @@ pub struct OpenFs {
     /// Shared across all snapshots/transactions that operate on this filesystem.
     /// Writes stage versions here; reads check here before falling back to device.
     mvcc_store: Arc<FsMvccStore>,
+    /// Highest MVCC commit sequence durably checkpointed to this filesystem's
+    /// base device. The mutex serializes concurrent fsync/flush calls so an older
+    /// checkpoint cannot overwrite a newer one after its watermark publishes.
+    mvcc_flushed_through: Mutex<CommitSeq>,
     /// Optional JBD2 writer for ext4 compatibility-mode write path.
     ///
     /// When present, `commit_transaction_journaled` journals writes to the
@@ -4151,6 +4155,7 @@ impl OpenFs {
             ext4_forced_read_only: AtomicBool::new(false),
             dev,
             mvcc_store,
+            mvcc_flushed_through: Mutex::new(CommitSeq(0)),
             jbd2_writer: None,
             ext4_alloc_state: None,
             #[cfg(feature = "bhh0i_sharded_alloc")]
@@ -7122,6 +7127,25 @@ impl OpenFs {
             || self.btrfs_alloc_state.is_some()
     }
 
+    /// Incrementally checkpoint MVCC versions to this filesystem's base device.
+    ///
+    /// Holding the cursor mutex across the write and sync serializes concurrent
+    /// fsync callers: an older snapshot can never overwrite a newer durable
+    /// snapshot after the newer watermark has been published. The watermark is
+    /// advanced only on success, so a partial/failed write is retried in full.
+    fn flush_mvcc_versions_to_device<D: BlockDevice>(
+        &self,
+        cx: &Cx,
+        device: &D,
+    ) -> ffs_error::Result<usize> {
+        let mut flushed_through = self.mvcc_flushed_through.lock();
+        let (flushed, durable_through) =
+            self.mvcc_store
+                .flush_to_device_after(cx, device, *flushed_through)?;
+        *flushed_through = (*flushed_through).max(durable_through);
+        Ok(flushed)
+    }
+
     /// Flush all committed MVCC block versions to the underlying image.
     ///
     /// This materialises in-memory writes to durable storage.  Call this
@@ -7132,7 +7156,7 @@ impl OpenFs {
             "flush_mvcc_to_device",
             (|| {
                 let base_dev = self.direct_block_device_adapter();
-                let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
+                let flushed = self.flush_mvcc_versions_to_device(cx, &base_dev)?;
                 self.clear_ext4_writable_group_desc_cache();
                 // When GDT persistence is deferred (bd-cc-gdt-defer), write every
                 // group descriptor once here from the authoritative in-memory
@@ -26742,7 +26766,7 @@ impl OpenFs {
         // Flush committed MVCC block versions to the underlying device so
         // that data written through the MVCC store becomes durable on disk.
         let base_dev = self.direct_block_device_adapter();
-        let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
+        let flushed = self.flush_mvcc_versions_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
         if flushed > 0 {
             trace!(
@@ -27042,7 +27066,7 @@ impl OpenFs {
 
             // Flush committed MVCC block versions to the underlying device.
             let base_dev = self.direct_block_device_adapter();
-            let flushed = self.mvcc_store.flush_to_device(cx, &base_dev)?;
+            let flushed = self.flush_mvcc_versions_to_device(cx, &base_dev)?;
             self.clear_ext4_writable_group_desc_cache();
             if flushed > 0 {
                 trace!(
@@ -32409,7 +32433,7 @@ impl OpenFs {
             return Err(FfsError::ReadOnly);
         }
         let base_dev = self.direct_block_device_adapter();
-        self.mvcc_store.flush_to_device(cx, &base_dev)?;
+        self.flush_mvcc_versions_to_device(cx, &base_dev)?;
         self.clear_ext4_writable_group_desc_cache();
         // When GDT persistence is deferred (bd-cc-gdt-defer), write every group
         // descriptor here from the authoritative in-memory GroupStats — the

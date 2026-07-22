@@ -1104,6 +1104,23 @@ impl ShardedMvccStore {
     /// the next checkpoint (and the WAL). Completes the OpenFs store interface so the
     /// sharded store is wireable.
     pub fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
+        self.flush_to_device_after(cx, device, CommitSeq(0))
+            .map(|(flushed, _)| flushed)
+    }
+
+    /// Flush versions committed after `flushed_through` and return the snapshot
+    /// through which the device is durable.
+    ///
+    /// The caller must serialize calls and advance its watermark only after this
+    /// method succeeds. Keeping that cursor at the filesystem/device boundary
+    /// lets the public [`Self::flush_to_device`] retain its full-checkpoint
+    /// semantics for callers that supply unrelated devices.
+    pub fn flush_to_device_after<D: BlockDevice>(
+        &self,
+        cx: &Cx,
+        device: &D,
+        flushed_through: CommitSeq,
+    ) -> FfsResult<(usize, CommitSeq)> {
         let snapshot = self.current_snapshot();
         // Collect visible (block, bytes) across all shards (each under its read lock,
         // briefly), then sort + coalesce + write holding no shard lock.
@@ -1111,8 +1128,14 @@ impl ShardedMvccStore {
         for shard in &self.shards {
             let shard = shard.read();
             for (block, versions) in &shard.versions {
-                if let Some(bytes) =
-                    crate::resolve_version_bytes_at_or_before(versions, snapshot.high)
+                let Some(idx) = crate::newest_visible_index(versions, snapshot.high) else {
+                    continue;
+                };
+                if versions[idx].commit_seq <= flushed_through {
+                    continue;
+                }
+                if let Some(bytes) = compression::resolve_data_with(versions, idx, |v| &v.data)
+                    .map(std::borrow::Cow::into_owned)
                 {
                     items.push((*block, bytes));
                 }
@@ -1143,7 +1166,7 @@ impl ShardedMvccStore {
         if flushed > 0 {
             device.sync(cx)?;
         }
-        Ok(flushed)
+        Ok((flushed, snapshot.high))
     }
 
     /// Commit a transaction with first-committer-wins (FCW) conflict detection.
@@ -1509,10 +1532,117 @@ impl ShardedMvccStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
     use std::sync::Arc;
 
     fn make_store(shards: usize) -> ShardedMvccStore {
         ShardedMvccStore::new(shards)
+    }
+
+    #[derive(Debug)]
+    struct CheckpointDevice {
+        blocks: RwLock<HashMap<BlockNumber, Vec<u8>>>,
+        block_size: u32,
+        block_count: u64,
+    }
+
+    impl CheckpointDevice {
+        fn new(block_size: u32, block_count: u64) -> Self {
+            Self {
+                blocks: RwLock::new(HashMap::new()),
+                block_size,
+                block_count,
+            }
+        }
+    }
+
+    impl BlockDevice for CheckpointDevice {
+        fn read_block(
+            &self,
+            _cx: &Cx,
+            block: BlockNumber,
+        ) -> ffs_error::Result<ffs_block::BlockBuf> {
+            let data = self
+                .blocks
+                .read()
+                .get(&block)
+                .cloned()
+                .unwrap_or_else(|| vec![0_u8; self.block_size as usize]);
+            Ok(ffs_block::BlockBuf::new(data))
+        }
+
+        fn write_block(&self, _cx: &Cx, block: BlockNumber, data: &[u8]) -> ffs_error::Result<()> {
+            self.blocks.write().insert(block, data.to_vec());
+            Ok(())
+        }
+
+        fn block_size(&self) -> u32 {
+            self.block_size
+        }
+
+        fn block_count(&self) -> u64 {
+            self.block_count
+        }
+
+        fn sync(&self, _cx: &Cx) -> ffs_error::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn incremental_flush_writes_only_versions_after_watermark() {
+        const BS: u32 = 4096;
+        let cx = Cx::for_testing();
+        let store = make_store(4);
+        let dev = CheckpointDevice::new(BS, 64);
+
+        let mut initial = store.begin();
+        initial.stage_write(BlockNumber(10), vec![0x10; BS as usize]);
+        initial.stage_write(BlockNumber(11), vec![0x11; BS as usize]);
+        store.commit(initial).expect("initial commit");
+        let (initial_flushed, initial_through) = store
+            .flush_to_device_after(&cx, &dev, CommitSeq(0))
+            .expect("initial checkpoint");
+        assert_eq!(initial_flushed, 2);
+
+        let mut changed = store.begin();
+        changed.stage_write(BlockNumber(11), vec![0xBB; BS as usize]);
+        changed.stage_write(BlockNumber(20), vec![0xCC; BS as usize]);
+        store.commit(changed).expect("changed commit");
+        let (incremental_flushed, incremental_through) = store
+            .flush_to_device_after(&cx, &dev, initial_through)
+            .expect("incremental checkpoint");
+        assert_eq!(incremental_flushed, 2);
+        assert!(incremental_through > initial_through);
+
+        let blocks = dev.blocks.read();
+        assert_eq!(
+            blocks.get(&BlockNumber(10)).unwrap(),
+            &vec![0x10; BS as usize],
+            "unchanged durable block must remain byte-identical"
+        );
+        assert_eq!(
+            blocks.get(&BlockNumber(11)).unwrap(),
+            &vec![0xBB; BS as usize]
+        );
+        assert_eq!(
+            blocks.get(&BlockNumber(20)).unwrap(),
+            &vec![0xCC; BS as usize]
+        );
+        drop(blocks);
+
+        let (repeat_flushed, repeat_through) = store
+            .flush_to_device_after(&cx, &dev, incremental_through)
+            .expect("idempotent checkpoint");
+        assert_eq!(repeat_flushed, 0);
+        assert_eq!(repeat_through, incremental_through);
+
+        let unrelated = CheckpointDevice::new(BS, 64);
+        assert_eq!(
+            store.flush_to_device(&cx, &unrelated).unwrap(),
+            3,
+            "public full-checkpoint API must not inherit another device's cursor"
+        );
     }
 
     #[test]

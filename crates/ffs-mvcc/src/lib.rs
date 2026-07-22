@@ -3451,6 +3451,23 @@ impl MvccStore {
     ///
     /// Returns the number of blocks flushed.
     pub fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
+        self.flush_to_device_after(cx, device, CommitSeq(0))
+            .map(|(flushed, _)| flushed)
+    }
+
+    /// Flush versions committed after `flushed_through` and return the snapshot
+    /// through which the device is durable.
+    ///
+    /// The caller must serialize calls and advance its watermark only after this
+    /// method succeeds. Keeping that cursor at the filesystem/device boundary
+    /// lets the public [`Self::flush_to_device`] retain its full-checkpoint
+    /// semantics for callers that supply unrelated devices.
+    pub fn flush_to_device_after<D: BlockDevice>(
+        &self,
+        cx: &Cx,
+        device: &D,
+        flushed_through: CommitSeq,
+    ) -> FfsResult<(usize, CommitSeq)> {
         let snapshot = self.current_snapshot();
         let mut flushed = 0usize;
 
@@ -3475,6 +3492,9 @@ impl MvccStore {
             let Some(idx) = newest_visible_index(versions, snapshot.high) else {
                 continue;
             };
+            if versions[idx].commit_seq <= flushed_through {
+                continue;
+            }
             let Some(data) = compression::resolve_data_with(versions, idx, |v| &v.data) else {
                 continue;
             };
@@ -3499,7 +3519,7 @@ impl MvccStore {
             device.sync(cx)?;
             debug!(flushed_blocks = flushed, "mvcc_flush_to_device");
         }
-        Ok(flushed)
+        Ok((flushed, snapshot.high))
     }
 
     pub fn prune_versions_older_than(&mut self, watermark: CommitSeq) {
@@ -4823,6 +4843,58 @@ mod tests {
         assert_eq!(
             *dev.blocks.read().get(&BlockNumber(20)).unwrap(),
             vec![0xAB; BS as usize]
+        );
+    }
+
+    #[test]
+    fn incremental_flush_writes_only_versions_after_watermark() {
+        const BS: u32 = 4096;
+        let cx = test_cx();
+        let mut store = MvccStore::new();
+        seed_block(&mut store, BlockNumber(10), &vec![0x10; BS as usize]);
+        seed_block(&mut store, BlockNumber(11), &vec![0x11; BS as usize]);
+
+        let dev = RunCountingDevice::new(BS, 64);
+        let (initial_flushed, initial_through) = store
+            .flush_to_device_after(&cx, &dev, CommitSeq(0))
+            .unwrap();
+        assert_eq!(initial_flushed, 2);
+
+        seed_block(&mut store, BlockNumber(11), &vec![0xBB; BS as usize]);
+        seed_block(&mut store, BlockNumber(20), &vec![0xCC; BS as usize]);
+        let (incremental_flushed, incremental_through) = store
+            .flush_to_device_after(&cx, &dev, initial_through)
+            .unwrap();
+        assert_eq!(incremental_flushed, 2);
+        assert!(incremental_through > initial_through);
+
+        let blocks = dev.blocks.read();
+        assert_eq!(
+            blocks.get(&BlockNumber(10)).unwrap(),
+            &vec![0x10; BS as usize],
+            "unchanged durable block must remain byte-identical"
+        );
+        assert_eq!(
+            blocks.get(&BlockNumber(11)).unwrap(),
+            &vec![0xBB; BS as usize]
+        );
+        assert_eq!(
+            blocks.get(&BlockNumber(20)).unwrap(),
+            &vec![0xCC; BS as usize]
+        );
+        drop(blocks);
+
+        let (repeat_flushed, repeat_through) = store
+            .flush_to_device_after(&cx, &dev, incremental_through)
+            .unwrap();
+        assert_eq!(repeat_flushed, 0, "published watermark is idempotent");
+        assert_eq!(repeat_through, incremental_through);
+
+        let unrelated = RunCountingDevice::new(BS, 64);
+        assert_eq!(
+            store.flush_to_device(&cx, &unrelated).unwrap(),
+            3,
+            "public full-checkpoint API must not inherit another device's cursor"
         );
     }
 

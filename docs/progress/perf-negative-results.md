@@ -13,6 +13,59 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Incremental MVCC durable-checkpoint watermark - 2026-07-22 (KEEP; bd-opb6l / bd-fsync-journal-latency-gap-ptp4x)
+
+Status: KEEP - mounted small-file durability now beats kernel ext4 on the measured
+fresh-image fsync storm while preserving stronger whole-store durability.
+
+Profile-first attribution found the old implementation re-writing every visible MVCC
+block on every durability call. After a small mounted create/write run, the daemon logged
+`flushed_blocks=2087` and `duration_us=22172` for one final `fsyncdir`; batch latency rose
+as the tracked store grew. A 1,124-cycle daemon profile put syscall/scheduler and memory
+movement at the top, consistent with cumulative checkpoint traffic. Ledger and recent-log
+grep found no prior incremental durable-watermark attempt and ruled out the closed
+duplicate-sync, DenseVisited, write-block ownership, bitmap, htree, checksum, and
+copy/materialization families.
+
+The kept lever adds `flush_to_device_after` to both MVCC store layouts and keeps the
+existing public `flush_to_device` as a full checkpoint. `OpenFs` owns a base-device-scoped
+`CommitSeq` watermark under a mutex held across write and sync. Only latest visible
+versions newer than that watermark are sorted, coalesced, and written. The cursor advances
+only after success, so a partial failure retries the full suffix; serializing calls prevents
+an older snapshot from overwriting a newer durable one. Mount/replay begins at sequence
+zero. Ordering and newest-visible tie-breaking are unchanged; floating point and RNG are
+N/A.
+
+The decisive proof used six fresh SHA-identical ext4 images per arm, rotating frozen-pre
+control A, frozen-pre control B, candidate, and kernel ext4 on one local worker. Each arm
+created and durably warmed exactly 8,000 128-byte files, then pre-created exactly 200
+128-byte files outside timing and timed 200 file fsync calls plus directory fsync. Medians:
+
+- control A: 22,595.882959 ms, CV 4.025369%
+- control B: 21,977.519074 ms, CV 3.062814%
+- candidate: 109.866157 ms, CV 3.503933%
+- kernel ext4: 3,718.134447 ms, CV 2.302359%
+
+Thus candidate is 200.039x faster than the faster frozen control, clearing the 1.028x
+null spread, and 33.842x faster than kernel ext4 (97.05% lower latency). FrankenFS provides
+stronger behavior here: the first file fsync durably checkpoints all 200 already-created
+files; the watermark makes the remaining calls skip already-durable MVCC versions. Every
+run verified exact counts and byte totals outside timing, and all 24 images passed offline
+`e2fsck -fn`. Source fixture SHA-256 was
+`0de4b44cacb300d71cbf2b1ae1ef3eca7d56668bec25a8a0aad2faaea874c7cb`; pre/candidate
+binary SHA-256 values were respectively
+`025e9adc5c53e896ee8fce450d401a5bdddf5df566339578995f3613232de316` and
+`aff29fdaf03f5de5fb39ea3dfe3af28ad523167334c7da1893d891c797cd1454`.
+
+Correctness gates: new single and sharded tests prove unchanged durable old blocks,
+changed/new-only incremental writes, idempotent zero-write repeat, and preserved public
+full-checkpoint behavior (2/2 strict-remote, `ovh-a`, job `j-29942429901652302`). The
+strict-remote all-target check for `ffs-mvcc` plus `ffs-core` passed in job
+`j-29942429901652292`; release CLI build passed in job `j-29942429901652307`.
+Targeted rustfmt and `git diff --check` passed. Two later full-crate-test submissions were
+rejected before execution because RCH had no admissible worker; fail-closed remote policy
+was honored and no local Cargo ran.
+
 ## ext4_write full-block build: skip the memset on a full-block overwrite - 2026-07-14 (KEEP)
 
 Status: KEEP — a real DEFAULT write-path win (not sharded/default-off).

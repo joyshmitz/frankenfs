@@ -198,10 +198,17 @@ impl FsMvccStore {
         Ok(())
     }
 
-    pub(super) fn flush_to_device<D: BlockDevice>(&self, cx: &Cx, device: &D) -> FfsResult<usize> {
+    pub(super) fn flush_to_device_after<D: BlockDevice>(
+        &self,
+        cx: &Cx,
+        device: &D,
+        flushed_through: CommitSeq,
+    ) -> FfsResult<(usize, CommitSeq)> {
         match self {
-            Self::Single(lock) => lock.read().flush_to_device(cx, device),
-            Self::Sharded(store) => store.flush_to_device(cx, device),
+            Self::Single(lock) => lock
+                .read()
+                .flush_to_device_after(cx, device, flushed_through),
+            Self::Sharded(store) => store.flush_to_device_after(cx, device, flushed_through),
         }
     }
 
