@@ -13,6 +13,40 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Dirty-fsync O(G) group-descriptor rewrite is disk-barrier-masked (flat with group count) → REJECT dirty-group tracking - 2026-07-23 (bd-fsync-journal-latency-gap-ptp4x / bd-kdmu4)
+
+Status: REJECT (measured, not reasoned). `ext4_persist_group_descriptors_from`
+rewrites ALL `G` group descriptors on every dirty fsync (`for gidx in
+0..alloc.groups.len()`, lib.rs:17857) versus kernel ext4's O(touched). I flagged
+this as a possible large-fs lever in prior turns but had only reasoned it away as
+disk-masked; this entry MEASURES it decisively.
+
+Measured: create+write(128B)+fsync-EACH storm of 200 files, per-op median, plain
+disk-backed image (real `fsync`), 2 arms differing only in filesystem size / group
+count:
+- 256 MiB fs (2 groups):   18.24 / 18.58 ms per create+fsync
+- 16 GiB fs (128 groups):  19.20 / 19.01 ms per create+fsync
+
+Per-op latency is FLAT (~+4%) across a 64x increase in group count. The O(G)
+descriptor rewrite is fully masked by the ~18 ms synchronous `fsync` disk barrier:
+the descriptor writes land in the image's page cache (buffered) before the single
+device `sync`, so they cost ~nothing on the wall clock, and the per-in-use-group
+bitmap-checksum preads are page-cache hits. On the common create-many-fsync-ONCE
+workload the incremental watermark already amortizes it to one flush per batch.
+
+Therefore the risky dirty-group-tracking rewrite (track a dirty-group set, rewrite
+only touched descriptors — flagged risky in prior ledgers: must cover every
+free-count mutation site or `df` goes stale, plus atomic contention on parallel
+alloc) is NOT justified: it cannot move a disk-barrier-bound wall clock, and the
+descriptor CPU is already buffered/overlapped.
+
+Retry predicate: reopen ONLY on a workload where the dirty fsync is NOT disk-
+barrier-bound AND the descriptor flush is on the critical path — e.g. a
+battery-backed / pmem / `nobarrier` device where `fsync` is ~free, on a
+many-hundred-group fs, with a per-file-fsync (not batched) storm — AND a
+same-worker A/B shows per-op latency scaling with `G`. On any normal
+disk/SSD-backed fsync this is disk-bound and there is no lever.
+
 ## Mounted metadata storm (stat-walk) is getattr-round-trip-bound + adaptive-readdirplus REJECT - 2026-07-23 (bd-kdmu4 small-file-storm sub-lane)
 
 Status: two findings. (1) The mounted metadata storm is 2.7-4.6x slower than
