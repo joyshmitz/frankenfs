@@ -13,6 +13,71 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## splice() zero-copy FUSE read reply — IMPLEMENTED, byte-identical, PERF-NEUTRAL → REJECT (bd-kdmu4 zero-copy read-path sub-lane) - 2026-07-23
+
+Status: REJECT. The safe-splice zero-copy read is byte-identical and the splice
+path provably engages, but it is measured PERF-NEUTRAL on every read shape.
+Production source stashed (`stash@{0}` "splice-read-reject-wip-2026-07-23"), not
+landed. This is the follow-through on the same-day REOPEN entry below: the lever
+was reopened as the top-priority in-lane item, fully implemented behind a
+default-OFF flag, measured, and rejected on the measurement.
+
+Implementation (all stashed): a full vertical slice —
+  - vendored fuser: `ReplySender::send_spliced(header, src_fd, offset, len)` with
+    a byte-identical `pread`+`send` default (mock senders unaffected) and a
+    `ChannelSender` override that stages the 16-byte `fuse_out_header` + splices
+    `src→pipe→/dev/fuse` through a per-thread `F_SETPIPE_SZ`-enlarged pipe, with
+    a session-level `SPLICE_WRITE_OK` disable-on-first-failure fallback and a
+    buffered fallback for payloads over the pipe soft-cap; `ReplyData::data_spliced`.
+  - ffs-block: `ByteDevice::backing_file() -> Option<Arc<File>>` (FileByteDevice
+    returns its `Arc<File>`; `OverlayByteDevice` forwards it ONLY when its overlay
+    holds no writes — clean journal — else None).
+  - ffs-core: `FsOps::splice_read_plan` returning `Some((file, phys_offset, len))`
+    only for a RO ext4 mount, plain-`FileByteDevice` backing, regular file, no
+    encrypt/compr/verity/inline, extent-mapped, whole range in ONE written
+    contiguous extent; `Arc<T>` forwarding of the new method (the crux miss that
+    made it silently no-op at first — the mount uses `Box<Arc<OpenFs>>`).
+  - ffs-fuse: default-OFF `FFS_FUSE_SPLICE_READ`, splice fast path in
+    `serve_read_request` before `read_with_readahead`.
+
+Correctness PROVEN: mounted-read sha256 byte-identical to the kernel across
+whole-file / 128K / 1M / 17000-byte-odd / small-file reads, with the flag both
+ON and OFF (fixture `data.bin` 3-extent 200 MiB + `small.bin`). `strace` confirms
+the splice path engages: 300×128K reads → 400 `splice` calls (200 read×2), and a
+`send_spliced: relay Done` trace on every eligible reply. A `SIGKILL`-class
+desync never occurred (RO mount, no writes).
+
+Decisive A/B (release-perf, daemon pinned 8-15, client 16-23, warm page cache,
+min-of-N, flag toggled in one binary):
+- single-stream 200 MiB read, 128 KiB chunks (splice engages): OFF min 74.7-75.8 ms
+  vs ON min 74.9-77.2 ms — NEUTRAL (within the ~2 ms run-to-run spread).
+- single-stream, 1 MiB chunks: OFF ~76 ms vs ON ~76 ms — NEUTRAL (and 1 MiB
+  payloads exceed the 1 MiB `pipe-max-size` so they fall back to buffered anyway).
+- 128×2 MiB multi-file, 16 parallel readers (the bd-kdmu4 headline shape): OFF
+  min 16.4-17.1 ms vs ON min 16.1-18.4 ms — NEUTRAL.
+
+ROOT CAUSE (this is the durable finding): the warm-large-read profile's "67%
+`_copy_to_iter`" is 67% of DAEMON CPU, NOT of wall-clock. FrankenFS's readahead
+prefetch (the `preadv` stream that still runs, ~960 `preadv` alongside the 400
+`splice`) already overlaps the page-cache→userspace copy OFF the wall-clock
+critical path, so eliminating the reply copy with splice frees daemon CPU that
+was not the bottleneck. The mounted read is dispatch/RTT/pipeline-bound (as the
+2026-07-22 async-dispatch and prefetch entries already found), not copy-bound.
+splice trades a `preadv`+`writev` copy pair for a `splice`+`splice` page-move
+pair of equal wall-cost on this pipeline. The `pipe-max-size` 1 MiB cap also
+excludes the largest single reads.
+
+Isomorphism: ordering/tie-breaking/bytes unchanged (sha256-proven); FP/RNG N/A.
+
+Retry predicate: reopen ONLY if a future profile shows the mounted read is
+DAEMON-CPU-bound (daemon saturating its cpuset with copy self-time ON the
+critical path, e.g. a many-client fan-in that out-runs prefetch overlap) AND a
+same-worker A/B beats the buffered path outside the A/A null. A zero-copy reply
+alone does not help while readahead prefetch overlaps the copy. Do NOT re-attempt
+the splice reply as a throughput lever for the current prefetch-overlapped read
+path. The infrastructure (safe `send_spliced`, `backing_file`, `splice_read_plan`)
+is preserved in the stash if a DAEMON-CPU-bound workload ever materializes.
+
 ## REOPEN + VALIDATED: splice() FUSE read replies are SAFE (not unsafe-blocked); warm large-read is 67% copy-tax - 2026-07-23 (bd-kdmu4 zero-copy read-path sub-lane)
 
 Status: REOPEN. Correcting a ledger MISCLASSIFICATION and attaching profile-first
