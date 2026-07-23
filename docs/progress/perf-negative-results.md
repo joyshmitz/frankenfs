@@ -13,6 +13,68 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Mounted metadata storm (stat-walk) is getattr-round-trip-bound + adaptive-readdirplus REJECT - 2026-07-23 (bd-kdmu4 small-file-storm sub-lane)
+
+Status: two findings. (1) The mounted metadata storm is 2.7-4.6x slower than
+kernel ext4 and is FUSE-round-trip-bound (like the create storm), not a
+FrankenFS-CPU lever. (2) Advertising adaptive readdirplus is byte-identical but
+PERF-NEUTRAL-to-slightly-worse → REJECT; source reverted. The durable finding is
+the ROOT cause below.
+
+Measured (256 MiB ext4 tree, 11040 entries across 40 dirs, warm, daemon pinned
+8-15, client 16-23):
+- `find` (readdir, names only): FFS instant (~0-10 ms) — readdir/dentry cache
+  works, name-only walks are already fast.
+- explicit `os.lstat` walk (readdir + getattr/entry): FFS min 231-283 ms vs
+  kernel 44 ms = ~4.6-6.4x.
+- `ls -lR` (getdents + stat + getxattr per entry): FFS 0.20-0.27 s vs kernel
+  0.07 s = ~2.7-3.9x.
+
+Profile (symbolized daemon): the daemon is FUSE-transport-bound — `Session::run`
+-> `read` 56%, `writev`/`send` 19%, scheduler block/wake 34%; NO `ffs_*` metadata
+frame reaches 1.5% self-time. Each `lstat` costs ~2 daemon requests (lookup +
+getattr); each `ls -l` entry costs ~8 (add per-entry `getxattr` for
+`security.selinux` / `system.posix_acl_access`). The gap is the synchronous FUSE
+round-trip per metadata op, which kernel ext4 does in-kernel. Read-only metadata
+ops could be dispatched concurrently, but `find`/`ls`/`os.walk` are SERIAL
+clients (each op waits for the previous reply), so concurrent daemon dispatch
+cannot help — same structural wall as the create storm.
+
+ROOT CAUSE of the repeat cost (the durable finding): the kernel does NOT serve
+cached attributes for this mount even though `getattr`/`entry` replies carry a
+60 s `attr_valid`/`entry_valid` (`ATTR_TTL`). 2000 repeated `os.lstat` of ONE
+file -> 2064 daemon `read`s (every stat round-trips). The dentry cache works
+(repeated same-path lookups don't round-trip) but the ATTR cache does not. This
+is almost certainly inherent RO-FUSE behavior: without `FUSE_CAP_WRITEBACK_CACHE`
+the kernel's `fuse_get_cache_mask()` is 0, so `fuse_update_get_attr` treats a
+`STATX_BASIC_STATS` request as needing fields outside the cache mask and syncs
+(getattr) on every stat regardless of `attr_valid`. writeback_cache requires
+`--rw` (RO mounts cannot opt in), so RO metadata caching is FUSE-limited, not a
+FrankenFS bug.
+
+REJECT — adaptive readdirplus advertisement: FrankenFS's `init` advertises SPLICE
++ PASSTHROUGH but NOT `FUSE_DO_READDIRPLUS`, so the (already-implemented, bd-
+xmh5g.399-optimized) `readdirplus` handler is never dispatched; the kernel uses
+readdir + per-entry getattr. Hypothesis: advertising `FUSE_DO_READDIRPLUS |
+FUSE_READDIRPLUS_AUTO` would collapse a stat-walk to ~1 round-trip/dir. Measured
+(default-ON vs `FFS_FUSE_READDIRPLUS=0`): byte-identical (`find -printf '%p %s'`
+sha `fe0d5180...` on both), but `ls -lR` NEUTRAL (0.21-0.27 s ON vs 0.20-0.25 s
+OFF) and daemon requests slightly HIGHER with it on (88907 vs 77827 over one warm
+`ls -lR`). Why it doesn't help: (a) the broken RO attr cache means the attrs
+readdirplus pre-populates are not served on the client's subsequent stat; (b)
+`ls -l`'s cost is dominated by per-entry `getxattr` (ACL/SELinux) round-trips
+that readdirplus does not carry; (c) the AUTO heuristic did not reduce round-trips
+on the warm walk. Source reverted (2 hunks in ffs-fuse `init`).
+
+Retry predicate: reopen readdirplus (and RO attr caching generally) ONLY after
+confirming the attr-cache mechanism with an `--rw --writeback-cache` mount — if
+writeback caches repeated stats and RO does not, RO metadata caching is inherent
+FUSE and neither lever helps; if even writeback fails to cache, root-cause the
+`attr_valid` handling as a real bug first. A readdirplus win additionally
+requires eliminating the per-entry `getxattr` round-trips (e.g. an xattr batch in
+the readdirplus reply, which the FUSE protocol does not support) — so readdirplus
+alone is not a stat-walk lever on ACL/SELinux-labeled trees.
+
 ## splice() zero-copy FUSE read reply — IMPLEMENTED, byte-identical, PERF-NEUTRAL → REJECT (bd-kdmu4 zero-copy read-path sub-lane) - 2026-07-23
 
 Status: REJECT. The safe-splice zero-copy read is byte-identical and the splice
