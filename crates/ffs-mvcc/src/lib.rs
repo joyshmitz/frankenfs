@@ -476,6 +476,19 @@ pub(crate) fn resolve_version_bytes_at_or_before(
 pub(crate) struct StagedWrite {
     pub(crate) bytes: Vec<u8>,
     pub(crate) merge_proof: MergeProof,
+    /// The block's content at this transaction's snapshot, as read during the
+    /// staging RMW, recorded ONLY when the store held no version for the block
+    /// (a first write to a freshly-allocated block, read straight from the base
+    /// device). The conflict-merge base is normally recovered from the version
+    /// chain via `version_bytes_at`, but a brand-new block that two transactions
+    /// concurrently write disjoint ranges of has NO version at their shared
+    /// snapshot, so the chain yields an empty base and the range-overlay merge
+    /// would spuriously reject on a length mismatch. This preserves the exact
+    /// common-ancestor bytes both writers RMW'd from so the merge is sound
+    /// (bd-bhh0i: freshly-allocated inode-table / GDT block under parallel
+    /// create). `None` for non-RMW writes and for writes over an existing
+    /// version (where `version_bytes_at` already returns the correct base).
+    pub(crate) base: Option<Vec<u8>>,
 }
 
 type StagedWrites = SmallVec<[(BlockNumber, StagedWrite); 4]>;
@@ -592,7 +605,14 @@ impl<'de> Deserialize<'de> for Transaction {
             .into_iter()
             .map(|(block, bytes)| {
                 let merge_proof = helper.merge_proofs.remove(&block).unwrap_or_default();
-                (block, StagedWrite { bytes, merge_proof })
+                (
+                    block,
+                    StagedWrite {
+                        bytes,
+                        merge_proof,
+                        base: None,
+                    },
+                )
             })
             .collect();
         Ok(Self {
@@ -642,7 +662,37 @@ impl Transaction {
         bytes: Vec<u8>,
         merge_proof: MergeProof,
     ) {
-        self.insert_staged_write(block, StagedWrite { bytes, merge_proof });
+        self.insert_staged_write(
+            block,
+            StagedWrite {
+                bytes,
+                merge_proof,
+                base: None,
+            },
+        );
+    }
+
+    /// Stage a write together with the block's pre-modification base bytes at
+    /// this transaction's snapshot. `base` must be `Some` exactly when the RMW
+    /// read the block from the base device because the store held no version at
+    /// the snapshot; it supplies the range-overlay merge's common ancestor for a
+    /// freshly-allocated block that has no version chain (bd-bhh0i). Passing
+    /// `None` is identical to [`stage_write_with_proof`](Self::stage_write_with_proof).
+    pub fn stage_write_with_proof_and_base(
+        &mut self,
+        block: BlockNumber,
+        bytes: Vec<u8>,
+        merge_proof: MergeProof,
+        base: Option<Vec<u8>>,
+    ) {
+        self.insert_staged_write(
+            block,
+            StagedWrite {
+                bytes,
+                merge_proof,
+                base,
+            },
+        );
     }
 
     fn insert_staged_write(&mut self, block: BlockNumber, staged: StagedWrite) {
@@ -679,6 +729,7 @@ impl Transaction {
             StagedWrite {
                 bytes,
                 merge_proof: MergeProof::Unsafe,
+                base: None,
             },
         );
     }
@@ -687,6 +738,16 @@ impl Transaction {
     pub fn staged_write(&self, block: BlockNumber) -> Option<&[u8]> {
         let idx = staged_write_pos(&self.staged_writes, block).ok()?;
         Some(self.staged_writes[idx].1.bytes.as_slice())
+    }
+
+    /// The RMW base bytes recorded for `block` (see [`StagedWrite::base`]).
+    /// `Some` only when this transaction's staging RMW read the block from the
+    /// base device because no version existed at its snapshot — the merge's
+    /// common-ancestor fallback for a freshly-allocated block (bd-bhh0i).
+    #[must_use]
+    pub(crate) fn staged_base(&self, block: BlockNumber) -> Option<&[u8]> {
+        let idx = staged_write_pos(&self.staged_writes, block).ok()?;
+        self.staged_writes[idx].1.base.as_deref()
     }
 
     #[must_use]
@@ -2435,6 +2496,7 @@ impl MvccStore {
         let proof = txn.merge_proof(block).cloned().unwrap_or_default();
         let base = self
             .version_bytes_at(block, txn.snapshot.high)
+            .or_else(|| txn.staged_base(block).map(std::borrow::Cow::Borrowed))
             .unwrap_or_default();
         let latest = self.version_bytes_at(block, observed).unwrap_or_default();
         proof
@@ -2480,6 +2542,7 @@ impl MvccStore {
         let proof = txn.merge_proof(block).cloned().unwrap_or_default();
         let base = self
             .version_bytes_at(block, txn.snapshot.high)
+            .or_else(|| txn.staged_base(block).map(std::borrow::Cow::Borrowed))
             .unwrap_or_default();
         let latest = self.version_bytes_at(block, observed).unwrap_or_default();
         if proof.merge_valid(&base, &latest, staged) {

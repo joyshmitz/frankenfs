@@ -185,12 +185,21 @@ impl FsMvccStore {
     {
         let mut txn = self.begin();
         let snapshot = txn.snapshot();
-        let mut data = match self.read_visible(block, snapshot) {
-            Some(bytes) => bytes,
-            None => read_base()?,
+        // When the store holds no version at the snapshot, the block is read
+        // from the base device and that content is the merge's common ancestor:
+        // record it so a concurrent writer to a disjoint range of the SAME
+        // freshly-allocated block can merge instead of FCW-conflicting (the
+        // version chain yields an empty base otherwise). A resident version
+        // needs no recorded base — `version_bytes_at` recovers it (bd-bhh0i).
+        let (mut data, base) = match self.read_visible(block, snapshot) {
+            Some(bytes) => (bytes, None),
+            None => {
+                let device_base = read_base()?;
+                (device_base.clone(), Some(device_base))
+            }
         };
         patch(&mut data)?;
-        txn.stage_write_with_proof(block, data, proof);
+        txn.stage_write_with_proof_and_base(block, data, proof, base);
         let commit_seq = self
             .commit(txn)
             .map_err(|error| FfsError::Format(error.to_string()))?;
@@ -510,9 +519,17 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         // no version at the snapshot, the block is still on the base device.
         let mut txn = self.store.begin();
         let snapshot = txn.snapshot();
-        let mut data = match self.store.read_visible_block_buf(block, snapshot) {
-            Some(buf) => buf.as_slice().to_vec(),
-            None => self.base.read_block(cx, block)?.into_inner(),
+        // Record the base-device content when no version exists at the snapshot,
+        // so concurrent disjoint-range writers to the SAME freshly-allocated
+        // block (e.g. two creates touching different group descriptors of a new
+        // GDT block) merge instead of FCW-conflicting (bd-bhh0i; the version
+        // chain gives an empty base otherwise).
+        let (mut data, base) = match self.store.read_visible_block_buf(block, snapshot) {
+            Some(buf) => (buf.as_slice().to_vec(), None),
+            None => {
+                let device_base = self.base.read_block(cx, block)?.into_inner();
+                (device_base.clone(), Some(device_base))
+            }
         };
         patch(&mut data)?;
         // Empty hint → identical to `write_block` (default `Unsafe` proof, no merge).
@@ -523,7 +540,7 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         } else {
             MergeProof::independent_keys(disjoint_ranges)
         };
-        txn.stage_write_with_proof(block, data, proof);
+        txn.stage_write_with_proof_and_base(block, data, proof, base);
         let commit_seq = self
             .store
             .commit(txn)
