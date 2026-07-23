@@ -13,6 +13,62 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## REOPEN + VALIDATED: splice() FUSE read replies are SAFE (not unsafe-blocked); warm large-read is 67% copy-tax - 2026-07-23 (bd-kdmu4 zero-copy read-path sub-lane)
+
+Status: REOPEN. Correcting a ledger MISCLASSIFICATION and attaching profile-first
+evidence. Prior rows (e.g. NEGATIVE_EVIDENCE.md 2026-07-04 swarm-routing) lumped
+"splice-class read gaps" with io_uring/mmap as "blocked by forbid(unsafe_code)".
+That is WRONG for splice: `nix::fcntl::splice` is a SAFE wrapper (takes `AsFd`,
+no `unsafe`; verified nix 0.29-0.31 signatures) — only mmap-file-maps and
+io_uring registered buffers require `unsafe`. splice was never actually blocked
+by the workspace lint; it was closed on a false premise. This entry reopens it
+with measurement.
+
+Profile-first (this is the key correction to the "copies ~3%" framing): the ~3%
+copy figure from 2026-07-22 was the SMALL-FILE multi-file read, which is
+dispatch/RTT-bound. The WARM LARGE-CONTIGUOUS read is the opposite — copy-bound.
+Symbolized daemon profile (release strip=false debug=1 to a scratch target dir,
+400 MiB single-file warm read repeated, `perf record -g --call-graph dwarf`):
+the daemon spends **82.9% in `preadv`, of which 67% is `_copy_to_iter` /
+`copy_page_to_iter`** — the kernel's page-cache -> daemon-buffer copy (COPY 1).
+The subsequent `ReplyData::data(&[u8])` -> `writev` to /dev/fuse is COPY 2. This
+IS the "~2x pread copy-tax" the lane names, now located and quantified on the
+workload where it dominates.
+
+Ceiling microbench (`os.splice` file->pipe->/dev/null vs preadv->buffer->write,
+400 MiB warm, 7 reps median): read+write 27.3 ms / 15.4 GB/s vs splice 19.4 ms /
+21.6 GB/s = **1.40x** at the copy layer. This UNDERSTATES the FUSE win because
+the microbench's `/dev/null` write is free, whereas the real path's COPY 2
+(writev to /dev/fuse) is a genuine copy that splice also eliminates. Mounted warm
+large read currently measures 2781 MB/s; splicing image_fd -> pipe -> /dev/fuse
+would replace COPY 1 + COPY 2 with page moves, leaving only the kernel's
+unavoidable /dev/fuse -> client copy (COPY 3).
+
+Feasibility (both fds are reachable): /dev/fuse fd via `ChannelSender(Arc<File>)`;
+image fd via `FileByteDevice::file() -> &Arc<File>`; physical offset via the
+existing extent resolve. Implementation is a correctness-critical vertical slice,
+so it is NOT rushed here (a bad FUSE read reply corrupts data):
+  - Slice A (vendored fuser): add `ReplySender::send_spliced(header, src_fd,
+    offset, len)` with a DEFAULT impl that reads into a buffer + `send` (so mock
+    senders are byte-identical), and a `ChannelSender` override that enlarges a
+    per-worker pipe via `F_SETPIPE_SZ` to max_read, writes the 16-byte
+    `fuse_out_header`, `splice(src->pipe)` then `splice(pipe->/dev/fuse)` as one
+    reply; plus `ReplyData::data_spliced(src_fd, offset, len)`.
+  - Slice B (ffs-core): a method returning `Some((image_fd, phys_offset, len))`
+    ONLY when the requested range is a single contiguous UNCOMPRESSED extent with
+    NO MVCC overlay / pending write for those blocks (else None -> materialize).
+  - Slice C (ffs-fuse read handler): try the eligibility check, splice-reply on
+    Some, fall back to `data(&buf)` on None. Env kill switch FFS_FUSE_SPLICE_READ
+    (default OFF). Gate: mounted-read sha256 byte-identity (flag on vs off vs
+    kernel) + warm large-read A/B + conformance.
+
+Retry/land predicate: implement the vertical slice behind the default-OFF flag;
+land only if a mounted read is sha256 byte-identical with the flag on AND a
+same-worker warm large-read A/B beats the materialize path outside the A/A null.
+Eligibility MUST exclude compressed extents, MVCC-overlaid blocks, fragmented
+(multi-extent) ranges, and any range crossing a hole. This is the top-priority
+in-lane lever; it is NOT ledger-closed.
+
 ## Mounted small-file create storm gap is FUSE-transport-bound, not a create-CPU lever - 2026-07-23 (NOT-A-LEVER / ledgered blocker; bd-kdmu4 small-file-storm sub-lane)
 
 Status: NOT-A-LEVER. The mounted single-thread create storm is 5.7x slower than
