@@ -13,6 +13,88 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Clean-device fsync skip via FileByteDevice write/sync epochs - 2026-07-22 (KEEP; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
+
+Status: KEEP. The unchanged-directory `fsyncdir` storm — the residual both same-day
+fsync-lane keeps left at 348-372x slower than kernel — is now 16.6x faster; the
+kernel gap on this shape drops from ~372x to ~27x, and the remainder is the
+synchronous FUSE round-trip itself (~25 us/call), not the sync path.
+
+Profile first: the prior keeps' profile put the leading sync-path address cluster
+at 18.94% and left the frozen storm at ~410 us/call. Source attribution found
+`ext4_sync_with_logging` calls `self.dev.sync` unconditionally, even when the
+no-op watermark guard returned `flushed == 0`. A host syscall pricing probe on
+the same backing filesystem made the attribution quantitative: fsync of a CLEAN
+file costs 398.3 us/call (dirty: 8.84 ms), matching the 411 us/call frozen
+residual almost exactly. Ledger grep: the closed 2026-07-14 "ext4 duplicate
+device-sync elision" family targeted the second sync after a DIRTY flush and was
+rejected only because the small remote workload could not resolve it, with retry
+predicate "tighter same-worker A/A controls or a deterministic sync-count/latency
+backend" — both are supplied here (0.73% A/A null; epoch counters + strace
+syscall counts), so this entry also satisfies that row's retry predicate rather
+than retrying a closed idea blind. No prior clean-device/dirty-epoch attempt
+exists in either ledger.
+
+The lever is device-level, not call-site-level: `FileByteDevice` now keeps an
+`Arc`-shared `(write_epoch, synced_epoch)` pair. Every attempted write syscall
+(success or failure — a failed `write_all_at` may have partially written)
+advances `write_epoch` after the syscall returns; `sync` reads `write_epoch`
+first, performs `sync_all`, then publishes the observed epoch via `fetch_max`.
+When the epochs are equal, `sync` returns without the syscall: no write has
+completed through this device (or any clone — clones share the state) since
+durability was last established, so there is nothing new to make durable. POSIX
+fsync only covers writes completed before the call, and a FUSE client cannot
+issue an fsync ordered after a write until the daemon replied to that write —
+which happens strictly after the epoch bump — so the skip is semantically exact.
+`write_epoch` starts ahead of `synced_epoch`, so the first sync after open
+always runs (covers mount-time journal replay through the separate journal fd on
+the same path). Env kill switch: `FFS_CLEAN_SYNC_SKIP=0` restores the old
+unconditional fsync. Because the MVCC flush path already syncs the device
+internally through the adapter (delegating to the same `FileByteDevice`), the
+outer boundary sync after a DIRTY flush now also skips — dirty boundaries issue
+exactly one real fsync instead of two, landing the 2026-07-14 duplicate-sync
+elision as a byproduct. Ordering preserved: no write is moved or elided, only a
+provably-no-op syscall. Tie-breaking, floating point, RNG: N/A.
+
+Decisive same-worker rotating A/A/B/kernel run (fresh image copy + fresh mount
+cycle per sample; 8,000 x 128-byte files + 3 sentinels populated outside timing;
+daemon pinned to CPUs 8-15, client to 16-23; sample = median of 3 batches x
+2,000 `fsync(dirfd)` calls on the unchanged 8,003-entry directory; 6 samples per
+arm; candidate binary SHA-256
+`b2e8f748bd3e2e82efbbad5bf14e05b943079ed0e17869eccd8cfc5f9be03ebe`, controls =
+same binary with `FFS_CLEAN_SYNC_SKIP=0`, fixture SHA-256
+`cff2c98c4d34e3d952a3b7f93fa22bfdbec7781942188b38bb42524f63a60dd8`):
+
+- control A (env-off): 821.785 ms median, CV 0.94%
+- control B (env-off): 827.777 ms median, CV 0.67% (A/A null spread 1.0073x)
+- candidate (lever on): 49.567 ms median, CV 6.99% (12-sample: 48.538 ms, CV 6.32%)
+- kernel ext4 (dio-loop): 1.846 ms median, CV 21.32% (routing evidence only)
+
+Candidate is 16.58x faster than the faster control; the candidate arm's CV sits
+above the 5% gate (RTT-bound shape on a loaded box), so the honest bound is
+worst-candidate vs best-control = 807.260/53.228 = 15.2x — the verdict cannot
+flip. Externally consistent: both env-off controls reproduce the prior session's
+frozen-pre controls (819.5/818.1 ms) within 1.2%. Per-call: 411 us -> 24.8 us;
+the removed 386 us equals the measured 398 us clean-fsync price within noise.
+
+Mechanism proof: strace of the daemon during a 500-call storm counted exactly 1
+fsync syscall with the lever on (the first-sync-always) vs 500 with it off.
+Durability proof (kill -9): with skips exercised before and after, a new file
+written and `fsync`ed, then SIGKILL (no graceful shutdown, no unmount flush):
+`e2fsck -fn` rc 0 and the payload's exact SHA-256 read back through a kernel
+mount. Every A/B cycle validated entry count, byte totals, and 3 sentinel
+payloads before and after timing, and every image passed `e2fsck -fn` rc 0.
+
+Gates: `cargo test -p ffs-block --lib` 309/0 including two new epoch-invariant
+tests (first-sync-always + clean-skip + re-dirty, clone-shared state);
+`cargo clippy -p ffs-block --all-targets -- -D warnings` clean (pre-existing
+bench/example lint debt cleared in the companion chore commit); release CLI
+build clean. Residual: the ~27x kernel gap on this shape is the synchronous FUSE
+round-trip (~25 us/call vs kernel ~0.9 us in-kernel fsyncdir); the concurrent
+dispatch that would amortize it is ledger-CLOSED above (multiloop REJECT) until
+its linearizability retry predicate is met. `clear_ext4_writable_group_desc_cache`
+still runs on every no-op boundary — a follow-up candidate, likely minor now.
+
 ## Shared-channel multiloop FUSE dispatch - 2026-07-22 (REJECT; bd-opb6l)
 
 Status: REJECT and restore the single FUSE receive/dispatch loop. The candidate
