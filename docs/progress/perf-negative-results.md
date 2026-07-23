@@ -13,6 +13,66 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i parallel-create cutover RUN LOCALLY — baseline convoys, inode-table merge-base bug FIXED+validated, block-bitmap FCW is the next gap (bd-bhh0i / bd-kdmu4) - 2026-07-23
+
+Status: MAJOR PROGRESS + INCOMPLETE. Disproved the standing "cutover is rch-remote-
+only-blocked" assumption: `create-bench` + `mke2fs` + `e2fsck` all run locally (as
+this whole campaign has). Ran the cutover A/B, found the single-lock convoy the
+lever targets, FIXED one concrete FCW-conflict bug (validated), and identified the
+NEXT one. Fix STASHED (`stash` "bhh0i-merge-base-fix"), not committed — one ffs-core
+test regression in the tree needs isolation first (see below).
+
+Cutover A/B (in-process `create-bench`, no FUSE transport; 2 GiB / 16-group image,
+40000 creates, `--threads`, feature `bhh0i_sharded_alloc`, per-thread subdir):
+- baseline (single-lock): 1t 143218 → 2t 112303 → 4t 81717 → 8t 79694 creates/s.
+  NEGATIVE scaling (the whole-state write-lock convoy the lever exists to remove).
+  e2fsck rc0 at every thread count.
+- sharded (`FFS_BHH0I_SHARDED=1`): 1t 62161 creates/s (single-thread sharded
+  overhead), but 2t+ PANIC with a first-committer-wins conflict.
+
+BUG 3 (FIXED, stashed): the FIRST sharded panic was
+`merge_proof_rejected: buffer length mismatch, base_len=0, latest_len=4096,
+staged_len=4096` on a freshly-allocated inode-table block (TimestampOnlyInode proof),
+then FCW-conflict. Root cause: `MvccStore::resolved_write_{bytes,valid}_with_policy`
+derives the merge base via `version_bytes_at(block, snapshot.high).unwrap_or_default()`,
+which is EMPTY for a brand-new block with no version at the snapshot — but two
+concurrent creates writing disjoint inode slots of that new block both RMW'd the
+same on-disk (device) content, which is the true common ancestor. The remote
+concurrency test (6ed27b4a) missed this because it PRE-POPULATES a base version
+(`read_visible(...).expect("base version visible")`), so base_len was always 4096.
+Fix: record the RMW's device-read base on the `StagedWrite` (only when no version
+existed) and fall back to it in the merge when `version_bytes_at` is None. Both
+concurrent writers record the identical device base → sound merge. Byte-identical
+for the single-lock / non-conflict path (base recorded but consumed only on a
+concurrent merge). Validated: ffs-mvcc `cargo test` 530/0 (all merge/SSI/sharded
+tests green); sharded 1t create-bench now writes all 40000 files with `e2fsck` rc0
+and the merge-rejection warning gone.
+
+BUG 4 (NEXT gap, not yet fixed): with BUG 3 fixed, sharded 2t now panics later, on
+`block 257` (dumpe2fs: the group-0 BLOCK BITMAP) with NO merge-proof warning — i.e.
+staged with the default `Unsafe` proof, no merge attempted. Concurrent block
+allocations (directory growth) in the same group both RMW the group's block bitmap;
+the per-group lock serializes the mutation but not the snapshot→commit window, so
+the second committer FCW-conflicts. Needs either a bitmap-aware merge proof (OR the
+disjoint set bits — a NEW proof kind, since two allocations can touch the same byte)
+or holding the per-group lock across the RMW+commit. This means the memory's "shared-
+metadata merge wiring COMPLETE / no remaining per-create shared-block conflict known
+on paper" was WRONG — the actual run exposes multiple conflict points (inode-table,
+now block-bitmap, and GDT is likely a third under cross-group load).
+
+ffs-core regression to isolate before landing BUG-3 fix: a `--features
+bhh0i_sharded_alloc` `cargo test -p ffs-core --lib` shows 1231 passed / 2 failed —
+`btrfs_reflink_random_matches_reference_model` (documented pre-existing flake) and
+`fast_commit_del_range_apply_punches_and_frees_passes_e2fsck` (an e2fsck-after-
+DEL_RANGE check). The BUG-3 fix is byte-identical for that single-threaded test
+(base recorded but never consumed without a concurrent merge), so it is not the
+cause; the likely source is the recent `36257e4b perf(bd-bhh0i): fix cutover BUG 2 —
+deferred-GDT flush sources from the sharded groups` commit or the uncommitted peer
+`sharded_alloc.rs` in the tree. Retry predicate: isolate `fast_commit` on a clean
+build (stash the peer's `sharded_alloc.rs`, revert BUG-3), then land BUG-3 + BUG-4
+together with the full local cutover gate (8t ≥ 4×1t AND `e2fsck` rc0 AND 40000-file
+read-back at every thread count).
+
 ## Dirty-fsync O(G) group-descriptor rewrite is disk-barrier-masked (flat with group count) → REJECT dirty-group tracking - 2026-07-23 (bd-fsync-journal-latency-gap-ptp4x / bd-kdmu4)
 
 Status: REJECT (measured, not reasoned). `ext4_persist_group_descriptors_from`
