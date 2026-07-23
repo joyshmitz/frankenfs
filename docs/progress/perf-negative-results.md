@@ -13,6 +13,48 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Mounted small-file create storm gap is FUSE-transport-bound, not a create-CPU lever - 2026-07-23 (NOT-A-LEVER / ledgered blocker; bd-kdmu4 small-file-storm sub-lane)
+
+Status: NOT-A-LEVER. The mounted single-thread create storm is 5.7x slower than
+kernel ext4, but a SYMBOLIZED daemon profile proves the entire delta is the
+synchronous FUSE round-trip; `FrankenFuse::create` / `ext4_create` do not reach
+0.8% self-time. No FrankenFS create-path CPU lever exists on this workload, and
+the only amortization (concurrent request dispatch) is ledger-CLOSED (multiloop
+REJECT corrupts allocation) / bd-bhh0i local-only cutover. Recorded so the gap is
+quantified and the create-CPU door is closed, not silently retried.
+
+Measured (fresh 256 MiB ext4 image, 3,000 x 128-byte files created into one dir,
+daemon pinned CPUs 8-15, client 16-23, plain-file backing = buffered so no
+per-op disk I/O):
+- no-fsync create storm: FrankenFS 590-621 ms vs kernel ext4 105-108 ms = ~5.7x
+  (~200 us/create vs ~35 us/create).
+- fsync-each create storm: FrankenFS 61,296 ms vs kernel 61,671 ms = PARITY
+  (each fsync is a real ~20 ms disk barrier; physics-bound, correctly at parity).
+
+Symbolized profile (release + `CARGO_PROFILE_RELEASE_STRIP=false DEBUG=1` to a
+scratch target dir, 6,000-create storm, `perf record -g --call-graph dwarf` on
+the daemon): the daemon time is `fuser::Session::run` -> `Channel::receive` ->
+`read` (30.6% reading FUSE requests), `writev` / `ReplySender::send` (~14%
+writing replies), and scheduler block/wake (`schedule`/`dequeue*` ~16% — the
+synchronous block-on-`read` between requests). The vendored fuser receive buffer
+is allocated ONCE before the loop and reused (`session.rs:148`), so there is no
+per-op receive-buffer alloc/memset despite `BUFFER_SIZE = 16 MiB + 4096`. Every
+`ffs_*` create frame (create/alloc/dir-entry/inode-write/commit) sits below the
+0.8% self-time floor.
+
+Also probed (out-of-lane, no lever): 128 MiB sequential write, `set_max_write`
+is never negotiated in `init`, but FrankenFS measures 176-235 ms vs a very noisy
+kernel 57-260 ms (writeback-timing variance) — roughly competitive, no clean gap,
+and the kernel comparator fails the <5% CV gate, so no `max_write` lever is
+justified.
+
+Retry predicate: reopen a create-CPU lever only if a future profile shows an
+`ffs_*` create frame above ~5% self-time on this workload (e.g. a new superlinear
+per-create cost). The transport gap itself reopens only with the bd-bhh0i sharded
+parallel-create local cutover (safe concurrent dispatch of allocation-disjoint
+creates) or a safe io_uring FUSE transport — both currently blocked (local-only /
+`forbid(unsafe_code)`).
+
 ## Clean-device fsync skip via FileByteDevice write/sync epochs - 2026-07-22 (KEEP; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l)
 
 Status: KEEP. The unchanged-directory `fsyncdir` storm — the residual both same-day
