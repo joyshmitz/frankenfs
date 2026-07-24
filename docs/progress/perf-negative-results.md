@@ -13,6 +13,58 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Read-only repeated-xattr result cache cannot address the mounted transport gap - 2026-07-23 (REJECT; bd-mounted-xattr-workload-gap-fr6iq)
+
+Status: REJECT before source edit. Ledger and recent-log grep first excluded the
+kept namespace borrow and by-index lookup plus the closed formatter, size-probe,
+result-vector, direct-wire tail, metadata-worker offload, and unsafe transport
+families. The remaining narrow hypothesis was an inode/name result cache for a
+read-only mount's repeated `getxattr` and `listxattr` requests.
+
+Profile first: the exact clean reference fixture
+`ffs_xattr_writer_reference_1677288_1782855891392514698.ext4` was cloned and
+mounted read-only through quiet FrankenFS and kernel ext4 `norecovery`. Its
+inline `user.mime` and `security.selinux`, 512-byte external `user.big`, absent
+name, POSIX ACL access/default values, and returned name lists matched exactly.
+A 500,000-syscall FrankenFS server profile captured **66K `cycles:u` samples
+with zero lost**. FUSE reply send accounted for **71.40% including children**
+and receive for **27.95%**. Core `getxattr` was **0.02% self**, the FUSE
+`getxattr` handler **0.04% self**, and external by-index lookup **0.01% self**.
+No internal list/parser frame cleared the 0.01% reporting floor.
+
+A pinned rotating 30-sample comparator then ran 20,000 validated iterations /
+100,000 syscalls per sample. FrankenFS measured **3,374.538 ms median /
+33.745 us per syscall**, CV **1.799%**. Kernel ext4 measured **409.368 ms /
+4.094 us per syscall**, CV **0.706%**. The admitted direct ratio is therefore
+**8.243x slower** for FrankenFS. This replaces the earlier 7.495x routing-only
+signal whose three arms all missed the 5% CV gate.
+
+A result cache cannot address that residual: it can remove only an internal
+lookup already below 0.04% self, while every hit must still cross the same
+synchronous FUSE metadata request/reply boundary. The profile-first gate
+therefore rejected the candidate before source or harness mutation; ordering,
+tie-breaking, floating point, and RNG are N/A. Every timed sample asserted
+aggregate result **11,380,000**. After unmount, both image clones were still
+byte-identical to the source (SHA-256
+`ccd38ae5397b1e7600cfd19d6901b5dee82f49a0fdadebe405d450f7dd6d74ca`)
+and passed `e2fsck -fn`.
+
+Strict-remote release-perf build: worker `vmi1227854`, job
+`j-29944835100114983`, binary SHA-256
+`1f8b41ed0780a7c1f7ee0664c7868cbe67dedecc4679fa26f6c3408ebf1dae91`.
+Profile:
+`/data/tmp/bronzerabbit_xattr_quiet_profile_4d309e82_20260723.data`.
+The fixture still lacks the required 24-name list tail, so the broad parent
+remains open despite the valid ratio for the covered shape.
+
+Retry predicate: reopen a result-cache lever only when a quiet mounted profile
+attributes at least **5% self** to an internal xattr frame. Reopen the
+end-to-end gap only when an authorized clean clone adds list-24 and a safe,
+supported transport primitive can bypass or batch metadata opcodes themselves.
+Then repeat exact value/name/errno parity, server profiling, rotating
+A/A/candidate/kernel measurement, effect beyond the A/A null, and CV below 5%
+for every arm.
+
 ## Clean-fsync parsed-GDT cache invalidation is below the transport floor - 2026-07-23 (REJECT; bd-fsync-journal-latency-gap-ptp4x)
 
 Status: REJECT before source edit. Ledger and recent-log grep first excluded the
