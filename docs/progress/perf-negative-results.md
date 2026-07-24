@@ -13,6 +13,52 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i cutover PASSES at 8k — block-bitmap find-race + inode-table pruning race FIXED; positive scaling (bd-bhh0i / bd-kdmu4) - 2026-07-24 (turn 8, ⭐ FIRST PASS)
+
+Status: two fixes LANDED (7653bdec); the sharded parallel-create cutover PASSES
+for the first time. As sole producer, drove the find-race (turn 7) to root cause
+and fixed it + a second race it unmasked.
+
+FIX 1 — block-bitmap find-race (`ext4_sharded_alloc_blocks`): the dir-growth block
+alloc threaded the caller's BATCHED dir-add txn (`TransactionBlockAdapter`) as
+`dev`, so it staged the bitmap write uncommitted. A concurrent same-group create's
+find reads committed state (`dev.read_block` live) and MISSED that pick → both
+picked the same free block → a double-alloc the OR-merge correctly fail-closes on.
+Root cause was NOT a missing proof (turn 7) — it was invisibility of the in-flight
+pick. Fix: auto-commit the bitmap UNDER THE PER-GROUP LOCK via
+`block_device_adapter`, exactly as the sharded inode alloc already does (which is
+why the inode bitmap never raced). Each pick is now committed before the lock
+releases → visible to the next find. (The turn-7 `BitmapOr`/`rmw_block_bitmap_or`
+proof-carrying path is now inert for the serialized bitmap but stays a correct
+safety net.)
+
+FIX 2 — inode-table pruning race (`rmw_commit_block_with_proof`): recorded
+`base=None` when a version existed at the txn's snapshot, relying on the version
+chain still holding it at commit. A concurrent committer's
+`prune_after_commit_if_due` drops the version at this (unregistered auto-commit)
+snapshot between stage and commit → the sharded merge's `version_bytes_at` yields
+an EMPTY base → a spurious `base_len=0` length-mismatch abort of two creates
+writing DISJOINT inode slots of the same inode-table block (proof
+`TimestampOnlyInode`). Fix: record the snapshot base ALWAYS.
+
+VALIDATED: `FFS_BHH0I_SHARDED=1 create-bench <512MiB/4-group ext4> / --count 8000
+--threads {1,4,8}`, 6/6 clean at 8 threads, e2fsck rc0. Scaling (debug binary):
+1t 9830 → 4t 17621 creates/s (~1.8x) → 8t ~24000 (~2.5x) = POSITIVE, vs the
+single-lock baseline's NEGATIVE scaling (1t 143k → 8t 80k). First time the cutover
+clears the e2fsck gate under concurrency.
+
+RESIDUAL BLOCKER (next): at count ~30000 (a 4-group fs's inodes ~92% full) a
+create intermittently fails `NotFound("inode <N>")` — an inode-table slot is lost.
+The inode NUMBER alloc is race-free (auto-commit under lock, verified), so this is
+a deeper MVCC merge-INSTALL race on the heavily-contended inode-table block
+(`merged_write_bytes_locked` rebuilding against a `latest` that a concurrent
+install advanced) under near-full-group pressure, NOT the pruning sub-case fixed
+here. Retry predicate for the full 3.7x: reproduce at count≥30000 with a
+per-inode-table-block conflict trace, fix the merge-install ordering, then measure
+release-perf 8t≥4×1t. Note: the memory's "512MiB/4-group, 40000 creates" recipe is
+inconsistent — 4 groups hold only 32768 inodes, so 40000 needs a ≥2GiB/16-group
+image; use that for the ≥4× headroom measurement.
+
 ## bd-bhh0i cutover — turn-4b diagnosis CORRECTED; proof-carrying batched-txn landed; real blocker is a FIND-RACE (bd-bhh0i / bd-kdmu4) - 2026-07-24 (turn 7)
 
 Status: substrate LANDED (1e08bb46) + deeper LEDGERED BLOCKER. As sole producer
