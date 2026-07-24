@@ -13,6 +13,54 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i BUG-4 wiring landed as substrate; cutover BLOCKED — sharded dir-growth bitmap write uses a NON-MVCC device (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 4b)
+
+Status: KEEP substrate + LEDGERED BLOCKER. Wired the OR-merge proof (turn 4 core)
+through the device path and RAN the local cutover — which surfaced a precise,
+diagnosed blocker that is NOT in my lane.
+
+Landed (byte-identical default; ffs-alloc 218/218 in BOTH `default` and
+`--features bhh0i_sharded_alloc`):
+- `BlockDevice::rmw_block_bitmap_or` seam (ffs-block: default = read/patch/write,
+  byte-identical for non-MVCC / MemBlockDevice) + `FsMvccBlockDevice` override
+  (ffs-core/fs_mvcc_store.rs) that reads the base AT the txn snapshot and stages
+  `MergeProof::BitmapOr` (mirrors `rmw_block`).
+- `try_alloc_blocks_in_group` routes its block-bitmap write through the seam
+  behind `cfg(feature = "bhh0i_sharded_alloc")`, scoped to the empty-rollback
+  (steady-state) case (`ffs-alloc/src/lib.rs`); default path keeps the plain
+  write. New feature `bhh0i_sharded_alloc` in `ffs-alloc/Cargo.toml`, propagated
+  from `ffs-core/Cargo.toml`.
+
+Cutover result (512 MiB / 4-group ext4, `FFS_BHH0I_SHARDED=1 create-bench / --count
+N --threads T`): **1 thread OK** (8376 creates/s, e2fsck rc0); **4 and 8 threads
+STILL PANIC** with the exact BUG-4 symptom `first-committer-wins conflict on block
+65` (group-0 block bitmap).
+
+Root cause (env-gated `FFS_BHH0I_DEBUG` instrumentation on every `FsMvccBlockDevice`
+method + the alloc branch, added→removed): block 65 reaches my ffs-alloc
+`rmw_block_bitmap_or` call (24×) but **NO `FsMvccBlockDevice` method ever sees it**
+(0 in `write_block`, `rmw_block`, and the `rmw_block_bitmap_or` override — while
+block 66 DID reach the override 4×, proving the seam works when `dev` is the MVCC
+device). The sharded **dir-growth** block alloc (`ShardedTreeBlockAllocator` →
+`ext4_sharded_alloc_blocks` → `try_alloc_blocks_in_group`) runs on
+`direct_block_device_adapter()` = `CachedByteDeviceBlockAdapter`, whose
+`write_block` delegates to `ByteDeviceBlockAdapter` → the RAW IMAGE (NON-MVCC).
+So the dir-growth bitmap write bypasses MVCC and the OR-merge proof cannot engage;
+yet the FCW conflict is a real MVCC conflict on block 65 (thousands of versions),
+i.e. a SEPARATE MVCC path also stages block 65. The MVCC/non-MVCC device split for
+the sharded block-bitmap alloc lives in **ffs-core's sharded create dev-threading
+(`ffs-core/src/lib.rs`)** — a PEER's actively-modified file.
+
+BLOCKER (stop condition): completing BUG-4 requires routing the sharded dir-growth
+block allocation through the MVCC device (`FsMvccBlockDevice`) so
+`rmw_block_bitmap_or` reaches the override and the OR-merge applies — a change in
+the peer's `ffs-core/lib.rs` sharded create path, needing coordination. The seam +
+`MergeProof::BitmapOr` proof landed here are the correct, tested substrate for it;
+once the alloc `dev` is the MVCC device, the merge engages (block-66 proof).
+Secondary finding: `Arc<D>`'s `BlockDevice` impl (ffs-block) forwards read/write
+but NOT `rmw_block` / `rmw_block_bitmap_or` (uses the trait default) — a latent gap
+for any `Arc<MVCC-device>` rmw caller; add forwarding when the dev-routing is fixed.
+
 ## bd-bhh0i BUG-4 core LANDED — MergeProof::BitmapOr bit-level OR-merge proof for the block-bitmap FCW (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 4)
 
 Status: KEEP (ab1567ba). The correctness-critical core BUG-4 needs. After BUG-5
