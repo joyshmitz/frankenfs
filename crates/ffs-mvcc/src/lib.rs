@@ -131,6 +131,12 @@ pub enum MergeProofMechanism {
     /// Overlay declared byte ranges after validating that both writers touched
     /// disjoint regions.
     RangeOverlay,
+    /// Bit-level OR of a monotone (set-only) allocation-bitmap block.
+    ///
+    /// Two allocators that SET the bits of disjoint blocks merge to `latest |
+    /// staged`, even when their bits share a byte (a byte-range overlay cannot
+    /// express this). Valid only when neither writer cleared a base bit.
+    BitmapOr,
 }
 
 /// Evidence label used when a same-block FCW conflict might be mergeable.
@@ -158,6 +164,20 @@ pub enum MergeProof {
     TimestampOnlyInode {
         touched_ranges: MergeByteRanges,
     },
+    /// Bit-level OR merge for a monotone (set-only) allocation-bitmap block.
+    ///
+    /// A block/inode bitmap packs 8 allocation bits per byte. Two concurrent
+    /// allocators in the same group each SET the bits of the disjoint blocks
+    /// they claimed, but adjacent free blocks share a byte, so an
+    /// [`Self::IndependentKeys`] byte-range proof cannot express the merge — the
+    /// writers overlap at the *byte* level while their *bits* are disjoint. This
+    /// proof merges them as `latest | staged` after validating that both writers
+    /// only SET bits relative to `base` (a *free* clears bits, so it fails this
+    /// validation and falls back to FCW — hence the proof is only ever staged on
+    /// the allocation path) and that their newly-set bits are disjoint (two
+    /// writers setting the same new bit is a real double-allocation that must
+    /// abort, not merge). Carries no ranges: the algorithm is whole-block.
+    BitmapOr,
 }
 
 impl MergeProof {
@@ -205,6 +225,7 @@ impl MergeProof {
             Self::IndependentKeys { .. }
             | Self::NonOverlappingExtents { .. }
             | Self::TimestampOnlyInode { .. } => MergeProofMechanism::RangeOverlay,
+            Self::BitmapOr => MergeProofMechanism::BitmapOr,
         }
     }
 
@@ -228,6 +249,7 @@ impl MergeProof {
             | Self::TimestampOnlyInode { touched_ranges } => {
                 merge_non_overlapping_ranges_valid(touched_ranges, base, latest, staged, self)
             }
+            Self::BitmapOr => bitmap_or_merge_valid(base, latest, staged),
         }
     }
 
@@ -246,6 +268,19 @@ impl MergeProof {
             | Self::NonOverlappingExtents { touched_ranges }
             | Self::TimestampOnlyInode { touched_ranges } => {
                 merge_non_overlapping_ranges(touched_ranges, base, latest, staged, self)
+            }
+            Self::BitmapOr => {
+                if !bitmap_or_merge_valid(base, latest, staged) {
+                    return None;
+                }
+                // Validity guarantees equal lengths and set-only writers, so the
+                // byte-wise OR `latest | staged` reconstructs every allocation:
+                // `base | latest_new | staged_new`, with no spurious bit.
+                let mut merged = latest.to_vec();
+                for (m, &s) in merged.iter_mut().zip(staged.iter()) {
+                    *m |= s;
+                }
+                Some(merged)
             }
         }
     }
@@ -289,7 +324,67 @@ fn merge_proof_variant_name(proof: &MergeProof) -> &'static str {
         MergeProof::IndependentKeys { .. } => "IndependentKeys",
         MergeProof::NonOverlappingExtents { .. } => "NonOverlappingExtents",
         MergeProof::TimestampOnlyInode { .. } => "TimestampOnlyInode",
+        MergeProof::BitmapOr => "BitmapOr",
     }
+}
+
+/// Validate a bit-level OR merge for a monotone (set-only) allocation-bitmap
+/// block WITHOUT building the merged block.
+///
+/// Returns `true` iff [`MergeProof::merge_bytes`] would produce the byte-OR
+/// `latest | staged`. Shared by `merge_valid` (preflight) and `merge_bytes`
+/// (install) so the yes/no decision can never diverge from the materialized
+/// output.
+///
+/// The three preconditions (all bit-level, hence uncatchable by a byte-range
+/// proof):
+///
+/// - **Equal length** across base/latest/staged — a bitmap block is fixed-size.
+/// - **Set-only** for both writers: neither cleared a bit set in `base`
+///   (`base & !latest == 0` and `base & !staged == 0`). A *free* clears bits, so
+///   a free operation fails here and falls back to FCW; the proof is therefore
+///   only ever staged on the allocation (bit-set) path.
+/// - **Disjoint new bits**: the bits each writer newly set are disjoint
+///   (`(latest & !base) & (staged & !base) == 0`). Overlap means both writers
+///   allocated the SAME block to different owners — a real double-allocation
+///   that MUST abort so the loser retries, not silently merge.
+///
+/// Under those preconditions `latest | staged == base | latest_new |
+/// staged_new`: every writer's allocation survives and no spurious bit appears.
+fn bitmap_or_merge_valid(base: &[u8], latest: &[u8], staged: &[u8]) -> bool {
+    if latest.len() != base.len() || staged.len() != base.len() {
+        warn!(
+            target: "ffs::mvcc::merge",
+            proof = "BitmapOr",
+            base_len = base.len(),
+            latest_len = latest.len(),
+            staged_len = staged.len(),
+            "merge_proof_rejected: buffer length mismatch"
+        );
+        return false;
+    }
+    for ((&b, &l), &s) in base.iter().zip(latest.iter()).zip(staged.iter()) {
+        // Set-only: a bit set in `base` must remain set in both writers.
+        if (b & !l) != 0 || (b & !s) != 0 {
+            warn!(
+                target: "ffs::mvcc::merge",
+                proof = "BitmapOr",
+                "merge_proof_rejected: a writer cleared a base bit (not a set-only bitmap merge)"
+            );
+            return false;
+        }
+        // Disjoint new bits: both writers setting the same fresh bit is a real
+        // double-allocation of one block, which must abort rather than merge.
+        if ((l & !b) & (s & !b)) != 0 {
+            warn!(
+                target: "ffs::mvcc::merge",
+                proof = "BitmapOr",
+                "merge_proof_rejected: writers set the same new bit (double-allocation)"
+            );
+            return false;
+        }
+    }
+    true
 }
 
 /// Validate a range-overlay merge (`IndependentKeys` / `NonOverlappingExtents`
@@ -2691,9 +2786,8 @@ impl MvccStore {
                                 false,
                                 true,
                             );
-                            self.contention_metrics.last_selected = Some(
-                                self.contention_metrics.select_policy(&self.adaptive_config),
-                            );
+                            self.contention_metrics.last_selected =
+                                Some(self.contention_metrics.select_policy(&self.adaptive_config));
                             self.maybe_emit_policy_switch(prev_effective);
                         }
                         return Err(err);
@@ -5428,7 +5522,6 @@ mod tests {
 
     #[test]
     fn merge_valid_matches_merge_bytes_is_some() {
-        let r = MergeByteRange::new;
         let base = vec![0_u8; 8];
         let mut latest = base.clone();
         latest[4..8].copy_from_slice(&[9, 9, 9, 9]);
@@ -5445,14 +5538,48 @@ mod tests {
         let cases: Vec<(MergeProof, &[u8], &[u8], &[u8])> = vec![
             (MergeProof::Unsafe, &base, &latest, &staged),
             (MergeProof::DisjointBlocks, &base, &latest, &staged),
-            (ind.clone(), &base, &latest, &staged),           // clean merge
-            (ind.clone(), &base, &latest, &staged_sneaky),    // outside-range reject
-            (ind.clone(), &base, &latest_conflict, &staged),  // true-conflict reject
-            (ind.clone(), &base, &base[..4], &staged),        // size mismatch reject
-            (MergeProof::non_overlapping_extent_range(0, 5), &base, &latest, &staged), // overlaps latest range? no; still valid check
-            (ap.clone(), b"abc", b"abcX", b"abcY"),           // append clean
-            (ap.clone(), b"abc", b"Xbc!", b"abcY"),           // append prefix reject
-            (MergeProof::AppendOnly { base_len: 10 }, b"abc", b"abcX", b"abcY"), // oversized base_len
+            (ind.clone(), &base, &latest, &staged), // clean merge
+            (ind.clone(), &base, &latest, &staged_sneaky), // outside-range reject
+            (ind.clone(), &base, &latest_conflict, &staged), // true-conflict reject
+            (ind.clone(), &base, &base[..4], &staged), // size mismatch reject
+            (
+                MergeProof::non_overlapping_extent_range(0, 5),
+                &base,
+                &latest,
+                &staged,
+            ), // overlaps latest range? no; still valid check
+            (ap.clone(), b"abc", b"abcX", b"abcY"), // append clean
+            (ap.clone(), b"abc", b"Xbc!", b"abcY"), // append prefix reject
+            (
+                MergeProof::AppendOnly { base_len: 10 },
+                b"abc",
+                b"abcX",
+                b"abcY",
+            ), // oversized base_len
+            (MergeProof::BitmapOr, &base, &latest, &staged), // disjoint-byte set-only merge
+            // Crux: disjoint BITS that share a byte — valid OR merge.
+            (
+                MergeProof::BitmapOr,
+                &[0b0000_0001][..],
+                &[0b0000_0011][..],
+                &[0b0000_0101][..],
+            ),
+            // A writer cleared a base bit (a free) — reject, falls back to FCW.
+            (
+                MergeProof::BitmapOr,
+                &[0b0000_0011][..],
+                &[0b0000_0001][..],
+                &[0b0000_0011][..],
+            ),
+            // Both writers set the SAME new bit — double-allocation, reject.
+            (
+                MergeProof::BitmapOr,
+                &[0b0000_0000][..],
+                &[0b0000_0010][..],
+                &[0b0000_0010][..],
+            ),
+            // Length mismatch — reject.
+            (MergeProof::BitmapOr, &base, &base[..4], &staged),
         ];
         for (i, (proof, b, l, s)) in cases.iter().enumerate() {
             assert_eq!(
@@ -5549,11 +5676,98 @@ mod tests {
                 MergeProof::timestamp_only_inode_range(2, 2),
                 MergeProofMechanism::RangeOverlay,
             ),
+            (MergeProof::BitmapOr, MergeProofMechanism::BitmapOr),
         ];
 
         for (proof, mechanism) in cases {
             assert_eq!(proof.mechanism(), mechanism, "proof label {proof:?}");
         }
+    }
+
+    #[test]
+    fn bitmap_or_merges_disjoint_bits_sharing_a_byte() {
+        // Two allocators claim different blocks whose bitmap bits live in the
+        // SAME byte — the case a byte-range (IndependentKeys) proof cannot
+        // express. base=block 0 already allocated; `latest` also took block 1,
+        // `staged` also took block 2. The merge must keep all three bits.
+        let base = vec![0b0000_0001_u8, 0x00];
+        let latest = vec![0b0000_0011_u8, 0x00]; // + block 1
+        let staged = vec![0b0000_0101_u8, 0x00]; // + block 2
+        let merged = MergeProof::BitmapOr
+            .merge_bytes(&base, &latest, &staged)
+            .expect("disjoint bits sharing a byte must OR-merge");
+        assert_eq!(merged, vec![0b0000_0111_u8, 0x00]);
+    }
+
+    #[test]
+    fn bitmap_or_rejects_a_cleared_base_bit() {
+        // `latest` FREED block 0 (cleared its bit). A free is not a set-only
+        // bitmap merge — must fall back to FCW so the concurrent set is not lost.
+        let base = vec![0b0000_0011_u8];
+        let latest = vec![0b0000_0001_u8]; // cleared bit 1
+        let staged = vec![0b0000_0111_u8]; // set bit 2
+        assert!(
+            MergeProof::BitmapOr
+                .merge_bytes(&base, &latest, &staged)
+                .is_none(),
+            "a bit-clear (free) must reject the OR merge"
+        );
+        // Symmetric: staged clears a base bit.
+        assert!(
+            MergeProof::BitmapOr
+                .merge_bytes(&base, &[0b0000_0111_u8], &[0b0000_0001_u8])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bitmap_or_rejects_double_allocation_of_the_same_bit() {
+        // Both writers newly SET bit 3 of the same byte: they handed the same
+        // block to two owners. The merge must abort (loser retries), never
+        // silently coalesce the double-allocation.
+        let base = vec![0b0000_0001_u8];
+        let latest = vec![0b0000_1001_u8]; // + bit 3
+        let staged = vec![0b0000_1001_u8]; // + bit 3 (same!)
+        assert!(
+            MergeProof::BitmapOr
+                .merge_bytes(&base, &latest, &staged)
+                .is_none(),
+            "two writers setting the same new bit is a double-allocation; must reject"
+        );
+    }
+
+    #[test]
+    fn bitmap_or_rejects_length_mismatch() {
+        assert!(
+            MergeProof::BitmapOr
+                .merge_bytes(&[0, 0, 0, 0], &[0, 1], &[0, 0, 0, 2])
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bitmap_or_resolves_concurrent_same_block_alloc_via_store_commit() {
+        // End-to-end: two transactions each allocate a disjoint bit of a freshly
+        // seeded bitmap block, stage a BitmapOr proof, and the second commit must
+        // MERGE against the first instead of first-committer-wins aborting.
+        let mut store = MvccStore::new();
+        let block = BlockNumber(65); // group-0 block bitmap, the BUG-4 block
+        seed_block(&mut store, block, &[0b0000_0001_u8, 0x00]); // block 0 reserved
+
+        let mut first = store.begin();
+        let mut second = store.begin();
+        first.stage_write_with_proof(block, vec![0b0000_0011_u8, 0x00], MergeProof::BitmapOr);
+        second.stage_write_with_proof(block, vec![0b0000_0101_u8, 0x00], MergeProof::BitmapOr);
+
+        store.commit(first).expect("first alloc commit");
+        let resolved = store
+            .resolved_writes_for_commit(&second)
+            .expect("BitmapOr proof must resolve the concurrent same-block alloc");
+        assert_eq!(
+            resolved,
+            vec![(block, vec![0b0000_0111_u8, 0x00])],
+            "both allocations must survive the OR merge"
+        );
     }
 
     #[test]
@@ -10678,6 +10892,75 @@ mod tests {
                     .expect("committed block must be visible");
                 prop_assert_eq!(data[0], byte, "block {} data mismatch", block);
             }
+        }
+
+        /// Algebra of the [`MergeProof::BitmapOr`] merge: for any two set-only
+        /// writers with disjoint newly-set bits, the merge equals `latest |
+        /// staged`, loses no allocation from any input, and invents no bit
+        /// outside the two writers.
+        #[test]
+        fn proptest_bitmap_or_merges_disjoint_set_only_writers(
+            base in prop::collection::vec(any::<u8>(), 8),
+            a_mask in prop::collection::vec(any::<u8>(), 8),
+            b_mask in prop::collection::vec(any::<u8>(), 8),
+        ) {
+            // latest = base ∪ A; staged = base ∪ (B \ A) so the new bits are
+            // disjoint — always a valid OR-merge construction.
+            let latest: Vec<u8> =
+                base.iter().zip(&a_mask).map(|(&x, &a)| x | a).collect();
+            let staged: Vec<u8> = base
+                .iter()
+                .zip(&b_mask)
+                .zip(&a_mask)
+                .map(|((&x, &b), &a)| x | (b & !a))
+                .collect();
+
+            let proof = MergeProof::BitmapOr;
+            prop_assert!(proof.merge_valid(&base, &latest, &staged));
+            let merged = proof
+                .merge_bytes(&base, &latest, &staged)
+                .expect("disjoint set-only writers must OR-merge");
+            prop_assert_eq!(
+                proof.merge_valid(&base, &latest, &staged),
+                merged.len() == base.len()
+            );
+            for i in 0..base.len() {
+                // Output is exactly the byte-wise OR of the two writers.
+                prop_assert_eq!(merged[i], latest[i] | staged[i]);
+                // No allocation lost: superset of every input.
+                prop_assert_eq!(merged[i] & base[i], base[i]);
+                prop_assert_eq!(merged[i] & latest[i], latest[i]);
+                prop_assert_eq!(merged[i] & staged[i], staged[i]);
+                // No bit invented beyond the two writers.
+                prop_assert_eq!(merged[i] | (latest[i] | staged[i]), latest[i] | staged[i]);
+            }
+        }
+
+        /// A bit-clear (free) or a same-new-bit double-allocation must reject
+        /// the OR merge (`merge_valid` and `merge_bytes` agree on the rejection).
+        #[test]
+        fn proptest_bitmap_or_rejects_clear_and_double_set(
+            base in prop::collection::vec(1u8..=255, 8),
+            pick in 0usize..8,
+        ) {
+            let proof = MergeProof::BitmapOr;
+            let idx = pick % base.len();
+
+            // A writer that clears a set base bit (a free) is not set-only.
+            let lsb = base[idx] & base[idx].wrapping_neg();
+            let mut latest = base.clone();
+            latest[idx] &= !lsb;
+            prop_assert!(proof.merge_bytes(&base, &latest, &base).is_none());
+            prop_assert_eq!(
+                proof.merge_valid(&base, &latest, &base),
+                proof.merge_bytes(&base, &latest, &base).is_some()
+            );
+
+            // Two writers setting the SAME new bit is a double-allocation.
+            let zbase = vec![0u8; 8];
+            let mut dbl = zbase.clone();
+            dbl[idx] = 0b0000_0010;
+            prop_assert!(proof.merge_bytes(&zbase, &dbl, &dbl).is_none());
         }
 
         /// Invariant: snapshot isolation — a snapshot sees only versions committed
