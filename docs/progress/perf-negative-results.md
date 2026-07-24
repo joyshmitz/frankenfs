@@ -13,6 +13,59 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i cutover — turn-4b diagnosis CORRECTED; proof-carrying batched-txn landed; real blocker is a FIND-RACE (bd-bhh0i / bd-kdmu4) - 2026-07-24 (turn 7)
+
+Status: substrate LANDED (1e08bb46) + deeper LEDGERED BLOCKER. As sole producer
+(cod capped) with ffs-core/lib.rs unfrozen, drove the cutover to its true root
+cause — and corrected the turn-4b ledger, which was WRONG.
+
+Turn-4b said the sharded dir-growth block-bitmap write used a non-MVCC
+`direct_block_device_adapter`. FALSE. `ext4_add_dir_entry` wraps the MVCC device
+(`block_device_adapter`) in a `TransactionBlockAdapter` — an explicit BATCHED
+transaction (`self.mvcc_store.begin()`) — and threads THAT as `dev` into the
+dir-growth alloc. Its default `rmw_block` / `rmw_block_bitmap_or` fell through to
+`write_block`, which stages `tx.stage_write` = `MergeProof::Unsafe`. So block 65's
+BitmapOr proof (and every GDT/inode-table range proof) was LOST at the adapter,
+and the batched txn FCW-aborted under concurrency. (Turn-4b's "block 65 never
+reaches FsMvccBlockDevice methods" was because it went to `tx.stage_write`, not
+because the device was non-MVCC.)
+
+LANDED (byte-identical default by non-reachability; ffs-alloc 218/218, ffs-block
+309/0): `TransactionBlockAdapter` now overrides `rmw_block` (→ `IndependentKeys`)
+and `rmw_block_bitmap_or` (→ `BitmapOr`), staging the proof into the batched txn
+with the merge base resolved at the txn's OWN snapshot via a new
+`BlockDevice::read_merge_ancestor_at_snapshot` (default `None`→`read_block`;
+`FsMvccBlockDevice`→ version at that snapshot, else raw base). Closes the
+2b-harden stale-read window; preserves read-your-writes within the batch.
+
+VERIFIED end-to-end (FFS_BHH0I_DEBUG instrumentation, added→removed): the override
+IS now reached (`stage_rmw block=65 mech=BitmapOr`, 4096-byte base/latest/staged),
+but the cutover STILL FCW-aborts on block 65 at 4/8 threads. The bitmap is
+monotone (alloc-only), so a BitmapOr rejection can ONLY be a disjoint-new failure
+= the SAME bit set by two writers = a genuine DOUBLE-ALLOCATION, which the
+OR-merge correctly fail-closes on.
+
+REAL BLOCKER — FIND-RACE: two concurrent same-group creates find the SAME free
+block. `PerGroupAlloc::alloc_blocks` locks the group and calls
+`try_alloc_blocks_in_group`, whose find does `dev.read_block` (the MVCC device's
+LIVE, committed view) — which MISSES the first create's staged-but-uncommitted
+allocation (staged in its own batched txn, not yet committed). So the second
+create, even serialized behind the group lock, sees the block still free and
+picks it too. The per-group lock serializes the find but not the visibility of
+in-flight allocations. The OR-merge (disjoint COMMITS) was necessary but not
+sufficient; disjoint PICKS are also required.
+
+FIX (next): an in-memory per-group bitmap of in-flight staged allocations,
+consulted (OR'd with the committed bitmap) by the sharded find and cleared on
+commit/rollback — so the second create sees the first's pick. A per-group
+allocation CURSOR alone does NOT suffice: on wrap-around it re-hits a block
+allocated-but-uncommitted before the wrap. Auto-committing the bitmap alloc under
+the group lock also works for the cutover but leaks a block on create-failure
+(the dir-add batched txn rolls back but the separately-committed bitmap bit does
+not). This lives in `sharded_alloc.rs` + `GroupStats` (ffs-alloc) — now editable
+(sole producer). Retry predicate for the 3.7x: implement the in-flight bitmap +
+the sharded find consults it → cutover 8t≥4×1t, e2fsck rc0, 40000-file read-back.
+
 ## Mounted frontier continuation: three fresh profile-first REJECTs and one 128-group fsck blocker - 2026-07-24 (BronzeRabbit)
 
 Status: **REJECT 3/3; no source change.** Ledger and recent-log grep preceded
