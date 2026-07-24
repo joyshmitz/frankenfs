@@ -2656,6 +2656,34 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
         Ok(())
     }
 
+    fn rmw_block(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        disjoint_ranges: &[(usize, usize)],
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), FfsError>,
+    ) -> Result<(), FfsError> {
+        // Empty hint → plain write (Unsafe). A non-empty hint stages a range-
+        // scoped IndependentKeys proof so concurrent creates touching disjoint
+        // slots of the same shared block (e.g. one GDT block, one inode-table
+        // block) MERGE at commit instead of first-committer-wins conflicting.
+        let proof = if disjoint_ranges.is_empty() {
+            MergeProof::Unsafe
+        } else {
+            MergeProof::independent_keys(disjoint_ranges)
+        };
+        self.stage_rmw(cx, block, proof, patch)
+    }
+
+    fn rmw_block_bitmap_or(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), FfsError>,
+    ) -> Result<(), FfsError> {
+        self.stage_rmw(cx, block, MergeProof::BitmapOr, patch)
+    }
+
     fn block_size(&self) -> u32 {
         self.base.block_size()
     }
@@ -2667,6 +2695,43 @@ impl BlockDevice for TransactionBlockAdapter<'_, '_> {
     fn sync(&self, _cx: &Cx) -> Result<(), FfsError> {
         // Syncing a transactional device is a no-op at the device level;
         // durability is handled when the transaction commits to the WAL.
+        Ok(())
+    }
+}
+
+impl TransactionBlockAdapter<'_, '_> {
+    /// Stage a proof-carrying read-modify-write into the batched transaction so
+    /// concurrent creates writing disjoint bits / ranges / slots of the same
+    /// shared metadata block (block bitmap → `BitmapOr`, GDT / inode-table slot →
+    /// `IndependentKeys`) MERGE at commit instead of first-committer-wins
+    /// conflicting. Without this, every such write went through the default
+    /// read/patch/write into `stage_write` (an `Unsafe` proof) and the batched
+    /// transaction FCW-aborted under concurrency (bd-bhh0i BUG 4 cutover).
+    ///
+    /// The merge base is resolved at the transaction's OWN snapshot — never the
+    /// wrapped device's read-your-writes view (2b-harden): a stale/newer base
+    /// would fold a concurrent writer's bits into `staged` and either clobber it
+    /// on a no-conflict install or spuriously fail the disjoint-new check.
+    /// Read-your-writes within the batch is preserved (an earlier in-txn write to
+    /// the same block is the content patched here).
+    fn stage_rmw(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        proof: MergeProof,
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> Result<(), FfsError>,
+    ) -> Result<(), FfsError> {
+        let mut tx = self.tx.lock();
+        let snapshot = tx.snapshot();
+        let (ancestor, base) = self
+            .base
+            .read_merge_ancestor_at_snapshot(cx, block, snapshot)?;
+        let mut data = match tx.staged_write(block) {
+            Some(staged) => staged.to_vec(),
+            None => ancestor.into_inner(),
+        };
+        patch(&mut data)?;
+        tx.stage_write_with_proof_and_base(block, data, proof, base);
         Ok(())
     }
 }

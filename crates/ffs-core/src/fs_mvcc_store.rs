@@ -586,6 +586,27 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         Ok(())
     }
 
+    fn read_merge_ancestor_at_snapshot(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        snapshot: Snapshot,
+    ) -> FfsResult<(BlockBuf, Option<Vec<u8>>)> {
+        // Resolve the ancestor at the CALLER's snapshot, independent of this
+        // device's own read-your-writes view. A version at `snapshot` → the store
+        // re-derives the base from its chain (record no base); otherwise the block
+        // is only on the raw base device → return its bytes AND record them as
+        // `staged_base` (mirrors the auto-commit rmw path).
+        match self.store.read_visible_block_buf(block, snapshot) {
+            Some(buf) => Ok((buf, None)),
+            None => {
+                let device = self.base.read_block(cx, block)?;
+                let base = device.as_slice().to_vec();
+                Ok((device, Some(base)))
+            }
+        }
+    }
+
     fn block_size(&self) -> u32 {
         self.base.block_size()
     }

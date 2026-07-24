@@ -14,7 +14,7 @@ use asupersync::Cx;
 use ffs_error::{FfsError, Result};
 use ffs_types::{
     BTRFS_SUPER_INFO_OFFSET, BTRFS_SUPER_INFO_SIZE, BlockNumber, ByteOffset, CommitSeq,
-    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, TxnId,
+    EXT4_SUPERBLOCK_OFFSET, EXT4_SUPERBLOCK_SIZE, Snapshot, TxnId,
 };
 #[cfg(feature = "s3fifo")]
 use parking_lot::RwLock;
@@ -1061,6 +1061,29 @@ pub trait BlockDevice: Send + Sync {
         let mut data = self.read_block(cx, block)?.into_inner();
         patch(&mut data)?;
         self.write_block(cx, block, &data)
+    }
+
+    /// The merge common-ancestor for `block` at `snapshot`: the block content as
+    /// of `snapshot`, plus the bytes to record as `staged_base` for a
+    /// proof-carrying stage into an EXTERNAL, already-begun transaction.
+    ///
+    /// The base MUST be resolved at THAT transaction's snapshot, not at this
+    /// device's own (possibly newer, read-your-writes) view — else a concurrent
+    /// writer's bits fold into the staged block and the OR-merge spuriously fails
+    /// its disjoint-new check. Returns `(content, base)` where `base` is `Some`
+    /// only when the store cannot re-derive the ancestor from its version chain
+    /// (i.e. the block has no version at `snapshot` and lives on the raw base
+    /// device). The default reads the current block and records no base — a
+    /// device with no MVCC overlay is snapshot-invariant and never participates
+    /// in a merge.
+    fn read_merge_ancestor_at_snapshot(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        snapshot: Snapshot,
+    ) -> Result<(BlockBuf, Option<Vec<u8>>)> {
+        let _ = snapshot;
+        Ok((self.read_block(cx, block)?, None))
     }
 
     /// Write a contiguous run of blocks starting at `start`. `data` holds the
