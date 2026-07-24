@@ -13,6 +13,47 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i cutover — BUG-3 LANDED; fast_commit regression is PRE-EXISTING on main; multiple concurrency bugs remain at 4t (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 2)
+
+Status: PROGRESS. BUG-3 (inode-table merge-base) LANDED as `18432557` after
+resolving the landing blocker. Two follow-on findings:
+
+fast_commit regression is PRE-EXISTING, not from BUG-3: `cargo test -p ffs-core
+--lib fast_commit_del_range_apply_punches_and_frees_passes_e2fsck` FAILS on a
+clean DEFAULT build (feature off, BUG-3 stashed) = clean origin/main. So the
+e2fsck-unclean-after-DEL_RANGE failure is a real committed data-integrity
+regression on main (in the fsync/journal lane; likely `23ad52f2 persist ext4
+summaries at fsync boundary`), independent of the sharded work and of BUG-3
+(which is byte-identical for that single-threaded test). BUG-3 was therefore
+landed without adding any red test (main was already red on fast_commit +
+btrfs_reflink flake). FOLLOW-UP: this DEL_RANGE regression deserves its own fix.
+
+The cutover still panics at >1 thread, on MULTIPLE blocks — the "merge wiring
+complete on paper" claim was badly wrong. Reproduced (512 MiB / 4-group image,
+40000 creates, `--threads 4`, FFS_BHH0I_SHARDED=1, binary with BUG-3):
+first-committer-wins conflicts on BOTH `block 65` (dumpe2fs: group-0 BLOCK BITMAP,
+BUG 4) AND `block 76` (an INODE-TABLE block — so BUG-3 fixed the 1-2 thread
+inode-table case but 4-thread load re-exposes an inode-table conflict). On the
+16-group image the bitmap conflict was `block 257`; the block number tracks the
+group-0 bitmap for the fs geometry.
+
+Diagnosis blocker: the panic backtrace only shows the createbench closure —
+`create` RETURNS the `CommitError::Conflict` (it doesn't panic at the write site),
+so the conflict ORIGIN (which write path, which proof, disjoint vs overlapping
+touched_ranges) is not on the trace. Next step MUST instrument the conflict
+point: a targeted log in `MvccStore::resolved_write_valid_with_policy` just before
+`Err(CommitError::Conflict)` printing block / proof variant / touched_ranges /
+base|latest|staged lengths, to distinguish (a) a disjoint-slot merge GAP the
+BUG-3 fix doesn't cover under N-way concurrency, (b) an inode/block ALLOCATION
+RACE handing two threads the same slot (overlapping ranges → correct rejection,
+but means the per-group lock doesn't serialize allocation), or (c) BUG 4 = the
+bitmap staged `Unsafe` (no merge). Likely fixes: bitmap needs a bit-level merge
+proof (OR set bits — a NEW proof kind, since two allocs can share a byte) or the
+per-group lock held across the RMW+commit; the inode-table N-way case needs the
+merge base/latest chain re-checked (possibly the recorded base is stale when a
+writer read an intermediate version). Retry: instrument → fix each conflict class
+→ full cutover gate (8t≥4×1t AND e2fsck rc0 AND 40000-file read-back per thread).
+
 ## bd-bhh0i parallel-create cutover RUN LOCALLY — baseline convoys, inode-table merge-base bug FIXED+validated, block-bitmap FCW is the next gap (bd-bhh0i / bd-kdmu4) - 2026-07-23
 
 Status: MAJOR PROGRESS + INCOMPLETE. Disproved the standing "cutover is rch-remote-
