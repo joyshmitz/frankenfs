@@ -88,6 +88,70 @@ REMAINING to complete the 3.7x cutover (next turn, precise plan):
   green. Coordinate: peer(s) active on `ffs-core/sharded_alloc.rs` — Slice 3 is
   in `ffs-alloc/lib.rs`, do NOT touch sharded_alloc.rs.
 
+## Fsync, small-file, and mounted-xattr measured frontier is transport/architecture-only - 2026-07-23 (BLOCKED; bd-fsync-journal-latency-gap-ptp4x / bd-opb6l / bd-mounted-xattr-workload-gap-fr6iq)
+
+Status: BLOCKED with no source edit. This is the consolidated stop condition
+after the list-24 direct-wire REJECT, not a claim that the kernel gaps are gone.
+A fresh negative-ledger grep and `git log --oneline -30` were run after commit
+`248dda68`, before considering another lever. They show that every remaining
+measured hotspot is either below the profile floor, already optimized, or
+inside the explicitly fenced architectural lane.
+
+Fsync/journal:
+
+- The newest quiet clean-directory profile measures FrankenFS at 14.957
+  us/call versus kernel ext4 at 401.219 us/call: FrankenFS is already 26.83x
+  faster on that exact no-op boundary. The proposed parsed-GDT-cache
+  invalidation was rejected because the whole enclosing function was only
+  0.02% self.
+- The dirty create+write+fsync-each workload is barrier-parity: 18.24-19.20 ms
+  for FrankenFS across 2 versus 128 groups, versus the same approximately
+  20-ms physical barrier that puts the mounted storm at kernel parity. The
+  64x group-count increase changed latency only about 4%, rejecting dirty-group
+  tracking on ordinary SSD/disk.
+- `ShardedMvccStore::flush_to_device` already sorts once, coalesces contiguous
+  blocks, emits one write per run, and performs one sync. The only remaining
+  structural durability lever is JBD2 cross-operation group commit / durable
+  visibility gating, which is an architectural crash-consistency change and is
+  outside this measured-frontier lane.
+
+Small-file storm:
+
+- Mounted single-thread create without fsync remains about 5.7x slower than
+  kernel (590-621 ms versus 105-108 ms for 3,000 files), but the symbolized
+  daemon profile is FUSE receive/reply/scheduler work; every `ffs_*` create
+  frame is below 0.8% self. Fsync-each is already kernel parity
+  (61,296 versus 61,671 ms).
+- The fresh serial-delete profile put
+  `remove_entry_take_inode_tracked` at only 1.16% self. Its disjoint checksum
+  snapshot lever was therefore rejected before edit. The remaining
+  `__memmove` / MVCC-publication costs and safe concurrent allocation cutover
+  are precisely the `bd-kdmu4` / `bd-bhh0i` architectural lane fenced to cc;
+  current log entries `ab1567ba` and `2f808ef8` confirm active ownership.
+- Shared-channel multiloop dispatch is not a fallback: its measured speedup
+  corrupted allocation/free accounting and failed offline fsck, so that family
+  stays ledger-closed until its linearizability predicate is met.
+
+Mounted xattr:
+
+- The clean fixture gap is FUSE transport-dominated (71-77% including
+  children). Result caching was rejected with internal frames at 0.01-0.04%
+  self. The list-24 direct-wire retry then removed the last eligible
+  names-materialisation seam but failed the decision gate: candidate CV 13.692%,
+  paired mean -2.376%, bootstrap 95% `[-7.441%, +0.622%]`. Its source is fully
+  reverted.
+
+Therefore there is no eligible one-lever source change left in the requested
+measured-frontier lane. Retry this consolidated blocker only when at least one
+of these predicates holds: (1) a fresh quiet symbolized mounted profile puts a
+non-fenced FrankenFS source frame at least 5% self on the critical path; (2) an
+authorized, safe FUSE metadata batching/bypass primitive becomes available;
+(3) the user explicitly hands off the `bd-kdmu4`/JBD2 architectural lane; or
+(4) fsync is measured on pmem/battery-backed/nobarrier storage where latency
+scales materially with group count instead of the device barrier. Until then,
+another parser, cache, checksum, or coalescing cut would knowingly repeat a
+dated REJECT below the transport/null floor.
+
 ## List-24 direct xattr wire encoding does not clear the mounted transport floor - 2026-07-23 (REJECT; bd-mounted-xattr-workload-gap-fr6iq)
 
 Status: REJECT; prototype source fully reverted. Ledger and recent-log grep
