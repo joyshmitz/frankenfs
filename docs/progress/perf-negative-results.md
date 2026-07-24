@@ -88,6 +88,72 @@ REMAINING to complete the 3.7x cutover (next turn, precise plan):
   green. Coordinate: peer(s) active on `ffs-core/sharded_alloc.rs` — Slice 3 is
   in `ffs-alloc/lib.rs`, do NOT touch sharded_alloc.rs.
 
+## List-24 direct xattr wire encoding does not clear the mounted transport floor - 2026-07-23 (REJECT; bd-mounted-xattr-workload-gap-fr6iq)
+
+Status: REJECT; prototype source fully reverted. Ledger and recent-log grep
+first excluded the kept namespace borrow and by-index lookup plus the closed
+formatter, size-probe, result-vector, metadata-worker offload, result-cache,
+and unsafe transport families. The prior list-24 retry predicate was then met
+with a private ext4 clone containing exactly `user.bench00` through
+`user.bench23`: 24 names, 792 value bytes, and a 312-byte NUL-separated list.
+
+Profile first: 500,000 validated baseline `listxattr` calls aggregated
+12,000,000 names in 68.627 seconds. The server profile captured 849
+`cycles:u` samples with zero lost. FUSE request/reply transport accounted for
+76.71% including children; `parse_xattr_entry_names` was 3.29% self and
+`__memmove` was 4.96% self overall, including 2.20% below the parser and 1.33%
+below FUSE encoding. This admitted one narrow prototype: walk ext4 names once
+and append namespace prefix, lossy-decoded name, and NUL directly into the FUSE
+payload, avoiding `Vec<String>` plus the second encoding pass. It did not alter
+transport, caching, batching, journaling, or the cc-owned architectural lane.
+
+The prototype compiled strict-remote and passed its exact namespace/invalid-
+UTF-8 wire test (1/1), the xattr-filtered `ffs-core`/`ffs-fuse` suites (80/80
+unit tests plus 2/2 public OpenFs ext4/btrfs integration tests; two pre-existing
+privileged tests ignored), and live mounted parity. Baseline, candidate, and
+kernel ext4 returned identical ordered names and values with combined SHA-256
+`79d600826ff6174187f7916ad7313335f455285883b296c4b979e50bbf1cc701`.
+Ordering was preserved by the same entry walker; tie-breaking, floating point,
+and RNG were N/A.
+
+The admissible control was a clean-overlay build of parent `16861e4b` on RCH
+worker `hz1`, SHA-256
+`1c85330a78c0afad14d9fd89467e808299f6738a30167be4a4e8c07e0f93c9ea`.
+The candidate was built on the same worker, SHA-256
+`f133372e24a295d2bee328f8354afcbe7ee38e846fbe9d083cd2c8b12dc236b0`.
+An earlier `4d309e82` control run was discarded before decision because it was
+not the immediate parent. Two full 30-round runs were also retained as invalid
+routing evidence: the first shared CPU 2 with a peer workload that went idle
+mid-run (all-arm CV 57-68%); the second encountered a migrating peer SciPy job
+(arm CV 10-20%). No quiet subset was selected.
+
+The final pinned, priority-isolated 30-round A/A/B/kernel run used 8,000
+validated calls per FFS sample and 35,000 per kernel sample. Parent controls
+were 45.106 and 45.081 us/call with CV 1.847% and 2.506%; kernel ext4 was
+10.682 us/call with CV 1.908%. The candidate median was 44.741 us/call, a
+nominal 0.791% improvement over the pooled 45.098-us control, but candidate CV
+was **13.692%**, failing the required under-5% gate. More decisively, paired
+mean improvement was **-2.376%** (regression), paired median was +0.546%, the
+deterministic 20,000-resample 95% bootstrap interval was
+**[-7.441%, +0.622%]**, and the candidate won only 19/30 rounds. The A/A null
+median was 0.637% (p95 4.971%). The raw candidate/kernel ratio was 4.188x, but
+the candidate's invalid CV forbids a direct-kernel verdict.
+
+The direct-wire source was reverted exactly; no source or benchmark harness
+remains. After unmount, the reference, parent, candidate, prior-baseline, and
+kernel clones were all byte-identical (SHA-256
+`d1186ba20a77d1c640ee747bd1ead1e901e08f975d01163b24094dee136cd38e`)
+and all passed `e2fsck -fn`.
+
+Retry predicate: do not retry list-24 direct encoding on the current host state.
+Reopen only on an exclusive or demonstrably quiet pinned host where a complete
+30-round same-parent A/A/B/kernel run gives every arm CV below 5%, the paired
+95% lower bound exceeds the measured A/A null, and either (a) a new profile
+attributes at least 10% self to names materialisation/encoding, or (b) the
+workload has at least 48 names / 624 wire bytes. Otherwise the mounted residual
+remains the synchronous FUSE metadata request/reply boundary and needs an
+authorized transport primitive rather than another parser/materialisation cut.
+
 ## Read-only repeated-xattr result cache cannot address the mounted transport gap - 2026-07-23 (REJECT; bd-mounted-xattr-workload-gap-fr6iq)
 
 Status: REJECT before source edit. Ledger and recent-log grep first excluded the
