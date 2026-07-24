@@ -13,6 +13,43 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i cutover — BUG-5 LANDED (sharded merge base); only the block-bitmap FCW (BUG-4) remains (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 3)
+
+Status: PROGRESS — cutover reduced to ONE remaining conflict. Root-caused why
+BUG-3 (turn 1) didn't fix the parallel path: the create-bench uses the SHARDED
+store (`ShardedMvccStore`, 32 shards), whose merge (`check_write_mergeable_locked`
+preflight + `merged_write_bytes_locked` install) derived the merge base ONLY from
+the version chain — empty for a freshly-allocated block — with NO staged_base
+fallback. BUG-3 had only fixed the single-store `MvccStore`. Env-gated conflict
+instrumentation (`FFS_MVCC_CONFLICT_DEBUG`, added then removed) confirmed the
+inode-table conflict was `proof=TimestampOnlyInode base_len=0 staged_base=false`.
+
+BUG-5 LANDED (`671cfa35`): added the staged_base fallback to BOTH sharded merge
+sites (preflight + install — both are needed; fixing only the preflight would pass
+the gate then install unmerged bytes via `merge_bytes`'s None fallback, clobbering
+the concurrent writer). Byte-identical for the non-conflict path. Validated:
+ffs-mvcc 488/0; the 4-thread sharded create-bench NO LONGER conflicts on the
+inode-table block (was `block 76`).
+
+BUG 4 — the ONLY remaining conflict (precisely diagnosed): after BUG-5, 4-thread
+create-bench conflicts solely on `block 65` (512 MiB fs: group-0 BLOCK BITMAP;
+`proof=Unsafe base_len=0 staged_base=false`). Mechanism: two concurrent CREATE
+operations each allocate a dir-growth block in the same group; the per-group lock
+serializes the in-memory bitmap read-modify, but the bitmap block is written
+staged `Unsafe` (no merge), so the two commits (which set DISJOINT bits from the
+same pre-write bitmap) first-committer-wins conflict. Fix needs a BIT-LEVEL
+OR-merge proof: a byte-range proof (`independent_keys`) fails because two
+allocations frequently set bits in the SAME byte (adjacent free blocks).
+Allocation is monotonic bit-set (never clears during a create storm), so the
+correct merge is `base | staged-new-bits | latest-new-bits` with validity "neither
+writer cleared a base bit." This is a NEW `MergeProof` variant (correctness-
+critical) plus routing the `ffs-alloc::try_alloc_blocks_in_group` bitmap
+`dev.write_block` through a proof-carrying RMW (like the GDT's `rmw_block`).
+Retry: implement the bitmap OR-merge proof + wire the bitmap write → full cutover
+gate (8t≥4×1t AND e2fsck rc0 AND 40000-file read-back per thread). The FREE path
+(punch/unlink) clears bits, so the proof/validity must handle mixed set+clear only
+if a workload interleaves frees with the storm — the pure-create storm is set-only.
+
 ## bd-bhh0i cutover — BUG-3 LANDED; fast_commit regression is PRE-EXISTING on main; multiple concurrency bugs remain at 4t (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 2)
 
 Status: PROGRESS. BUG-3 (inode-table merge-base) LANDED as `18432557` after
