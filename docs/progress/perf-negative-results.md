@@ -13,6 +13,83 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Mounted frontier continuation: three fresh profile-first REJECTs and one 128-group fsck blocker - 2026-07-24 (BronzeRabbit)
+
+Status: **REJECT 3/3; no source change.** Ledger and recent-log grep preceded
+each lever. All mounted work used the exact current release-perf binary on
+`vmi1227854` (SHA-256
+`8ebff1f9cd9d77ed8cc68fb874f8384eb54726dc827f4db39fadb909cc150aca`)
+inside a private privileged container, with the FUSE server pinned to CPU 8 and
+the driver pinned to CPU 9. The container's `/tmp` mountpoint was required by
+the host's AppArmor `fusermount3` policy; no host policy was changed. Raw
+timing, profile, and fsck artifacts are retained under
+`/data/tmp/bronzerabbit_frontier_20260724_Q7GDWQ/`.
+
+1. **Dirty fsync, 2 groups versus 128 groups — REJECT before edit plus
+   correctness BLOCKER (`bd-fsync-journal-latency-gap-ptp4x`).** A 30-round,
+   median-of-21 interleave measured duplicate 2-group FrankenFS controls at
+   191.922/211.106 us and the 128-group arm at 385.973 us. The paired
+   128g/2g median was 1.9397x and the ratio-of-medians 2.0111x, but the
+   duplicate-control null was already 1.1000x and CVs were
+   26.168/25.446/23.936%. Kernel 2g/128g medians were 369.524/291.471 us
+   with 90.105/58.767% CV. Thus no ratio is admitted. Exact parity was
+   630 files, 80,640 bytes, and payload digest `0797b68e...` for every arm.
+   Differential server profiles captured zero lost samples:
+   `Cx::checkpoint` was 16.65% self at 128 groups versus 2.64% at 2 groups,
+   but `ext4_persist_group_descriptors_from` remained only 0.47% self /
+   0.56% children, below the ledger's 5% named-frame floor.
+
+   Graceful unmount exposed a correctness blocker. `e2fsck -fn` returned rc 4
+   on the 128-group FrankenFS image: sparse-super backup groups
+   1,3,5,7,9,25,27,49,81,125 each reported a 1,027-block bitmap/count
+   discrepancy, 10,270 blocks total. The 2-group FrankenFS image and both
+   kernel images returned rc 0. This pattern is consistent with backup
+   super/GDT reservation bits becoming authoritative in formerly-uninitialized
+   group bitmaps, but that is an inference, not a diagnosed source cause.
+   **Retry predicate:** first reproduce and fix this sparse-super
+   backup-group durability/accounting failure with a minimal 128-group fixture
+   and clean offline fsck. Only then retry performance on an isolated worker
+   where all A/A/B/kernel arms have CV below 5% and an eligible non-fenced
+   descriptor-persistence frame is at least 5% self.
+
+2. **Mounted zero-byte create storm — REJECT before edit (`bd-opb6l`).**
+   A 30,000-create server profile captured 3,691 cycles:u samples, zero lost.
+   The only source frame above the frontier's 5% floor was
+   `ShardedMvccStore::read_visible_block_buf` at 5.43% self, which is the
+   explicitly fenced `bd-kdmu4` zero-copy/read architecture lane.
+   `ShardedMvccStore::commit` was 4.63% and `lookup_in_dir_block` 3.20%;
+   neither admits a local lever. A 30-round median-of-21 routing comparison
+   preserved 630-file/zero-byte parity per arm and measured FFS A/A at
+   66.555/66.750 us versus kernel 14.472 us, nominally 4.599x by medians.
+   CVs were 79.131/85.570/16.295%, so no direct ratio is admitted.
+   **Retry predicate:** a quiet profile must promote a non-`bd-kdmu4`,
+   non-architectural source frame to at least 5% self; then all same-worker
+   A/A/B/kernel arms must have CV below 5%, effect beyond null, exact file
+   parity, and clean fsck.
+
+3. **Mounted list-128 xattr direct-wire gate — REJECT before edit
+   (`bd-mounted-xattr-workload-gap-fr6iq`).** Private FrankenFS/kernel files
+   each contained 128 ordered one-byte attributes and a 1,664-byte list payload.
+   Names and values matched exactly (`9b5c1c1d...` / `471fb943...`). A
+   250,000-call profile captured 9,903 cycles:u samples, zero lost:
+   `parse_xattr_entry_names` was 25.24% self, `_rjem_malloc` 9.19%, FUSE
+   `listxattr` 8.38%, lossy UTF-8 iteration 7.76%, and
+   `String::from_utf8_lossy` 4.93%. The shape/profile retry thresholds were
+   met, but the mandatory pre-edit A/A gate was not: controls measured
+   48.978/42.258 us, CV 36.743/37.473%, absolute-null median 15.979%, and
+   absolute-null p95 63.921% versus the required p95 below 1%. Kernel was
+   11.459 us with 16.991% CV. No direct-wire source was reopened and no direct
+   kernel ratio is admitted. The small FrankenFS image containing this fixture
+   passed offline fsck rc 0. **Retry predicate:** do not retry until a pinned
+   pre-edit A/A run has absolute-null p95 below 1%; then require the paired
+   candidate 95% lower bound to exceed that null p95, every A/A/B/kernel arm
+   CV below 5%, exact mounted parity, and clean offline fsck.
+
+This continuation therefore stops at the requested terminal condition: three
+consecutive fresh REJECTs, with an independently ledgered current-source
+128-group fsck blocker. No production, test, benchmark, or harness source was
+edited.
+
 ## btrfs runtime path swept for a byte-identical per-op lever — SATURATED (bd-kdmu4) - 2026-07-24 (turn 6, REJECT #2)
 
 Status: REJECT (no source change). Cycling levers off the floored read path, swept
