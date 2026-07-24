@@ -13,6 +13,81 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i BUG-4 core LANDED — MergeProof::BitmapOr bit-level OR-merge proof for the block-bitmap FCW (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 4)
+
+Status: KEEP (ab1567ba). The correctness-critical core BUG-4 needs. After BUG-5
+(671cfa35) the sharded parallel-create cutover conflicts SOLELY on the group-0
+block bitmap (block 65): two concurrent creates alloc dir-growth blocks in the
+same group, set DISJOINT bits of the same pre-write bitmap, but the write stages
+`MergeProof::Unsafe` so the two commits first-committer-wins conflict. A
+byte-range (`IndependentKeys`) proof cannot express the merge — adjacent free
+blocks share a bitmap byte, so the writers overlap at the BYTE level while their
+BITS are disjoint.
+
+Added `MergeProof::BitmapOr` (+ `MergeProofMechanism::BitmapOr`): whole-block
+bit-level OR. `merged = latest | staged`, valid iff (1) equal length, (2) both
+writers are SET-ONLY vs base (`base & !latest == 0` && `base & !staged == 0`) —
+a *free* clears bits, fails this, and falls back to FCW, so the proof is only
+ever effective on the alloc path; and (3) newly-set bits are disjoint
+(`(latest & !base) & (staged & !base) == 0`) — two writers setting the same new
+bit is a real double-allocation that MUST abort so the loser retries, never
+silently coalesce. Under those preconditions `latest | staged == base |
+latest_new | staged_new`: every allocation survives, no bit is invented.
+`merge_valid` and `merge_bytes` share one validator (never diverge). Self-
+validating: a free operation makes the proof invalid → FCW, so misuse fails
+closed. Inert until a caller stages it (this commit adds no caller).
+
+Gate: ffs-mvcc 495/0 incl. 9 new/updated BitmapOr tests — the crux (disjoint
+bits sharing a byte OR-merge), fail-closed on free + on double-alloc, length
+mismatch, an end-to-end concurrent same-block-alloc `resolved_writes_for_commit`
+merge, the `merge_valid == merge_bytes.is_some()` invariant, and 2 proptests
+(positive algebra: no allocation lost / no bit invented; negative: clears +
+double-sets rejected). fmt clean. clippy on the crate is blocked by unrelated
+pre-existing pedantic/nursery debt in peer-uncommitted `ffs-ondisk` (ext4.rs,
+crc_incremental.rs) — not this change; my additions were hardened by inspection
+against the same lints (short first doc paragraphs, no `useless_vec`, private
+helper so no `must_use_candidate`).
+
+REMAINING to complete the 3.7x cutover (next turn, precise plan):
+- SLICE 2 (seam): add `BlockDevice::rmw_block_bitmap_or(cx, block, patch)` to
+  `ffs-block` (default impl = read→patch→write, byte-identical for non-MVCC /
+  MemBlockDevice) + an override on the MVCC device in
+  `ffs-core/fs_mvcc_store.rs` that begins a txn, reads the base AT the txn
+  snapshot (2b-harden rule: begin-first, else a stale-read no-conflict install
+  clobbers a concurrent disjoint-bit writer), applies `patch`, and stages
+  `MergeProof::BitmapOr` with the recorded device base (mirror `rmw_block` /
+  `rmw_commit_block_with_proof`).
+- SLICE 3 (wiring): in `ffs-alloc::try_alloc_blocks_in_group` route the bitmap
+  write (`dev.write_block(cx, stats.block_bitmap_block, &bitmap)`, ~line 2697)
+  through `rmw_block_bitmap_or` behind `cfg(feature = "bhh0i_sharded_alloc")`
+  (default path stays byte-identical). The closure re-applies THIS op's bit
+  mutations onto the base read at snapshot: the reserved marks (same
+  `force_reserved_mark() || !reserved_confirmed` condition) + `bitmap_set_range
+  (rel_start, alloc_count)`. Correctness note: converting to RMW-at-snapshot is
+  ALSO the fix for the current separate `read_block`(2633)→`write_block`(2697)
+  stale-read clobber hazard; if the found run is stale (concurrent alloc took
+  it) the OR-merge disjoint-new-bits check fails → abort → retry re-finds
+  (fail-closed, no double-alloc slips through).
+- SLICE 3 interaction check (verified in-lane): the per-op GDT persist +
+  block-bitmap checksum stamp is SKIPPED on the deferred path
+  (`persist_group_desc_with_bitmap_overrides` returns `Ok` early when
+  `gdt_persistence_deferred()`, default ON), and the GDT is re-persisted at
+  flush from authoritative state (36257e4b), so the per-op `block_bitmap_
+  override` inconsistency after a merge is moot on the cutover config; the
+  post-merge bitmap checksum is validated by e2fsck. The GDT-persist-error
+  rollback branch (2731) is unreachable on the deferred path (persist returns
+  Ok). ⚠ If run with the sharded feature but deferral OFF, the per-op override
+  (from local `bitmap`, not the merged content) could stamp a stale checksum —
+  not the cutover config, but guard or assert if wiring it generally.
+- SLICE 4 (validation = THE 3.7x measurement, LOCAL-ONLY): build
+  `CARGO_TARGET_DIR=/data/tmp/bhh0i_target cargo build --profile release-perf -p
+  ffs-cli --features bhh0i_sharded_alloc`; `FFS_BHH0I_SHARDED=1 create-bench
+  <img> /d --count 40000 --threads {1,4,8}`. Gate: no FCW conflict on block 65
+  at 4-8 threads, 8t ≥ 4×1t creates/s, e2fsck rc0, 40000-file read-back per
+  thread. Retry predicate for BUG-4 as a whole: SLICE 2+3 wired AND SLICE 4
+  green. Coordinate: peer(s) active on `ffs-core/sharded_alloc.rs` — Slice 3 is
+  in `ffs-alloc/lib.rs`, do NOT touch sharded_alloc.rs.
+
 ## Read-only repeated-xattr result cache cannot address the mounted transport gap - 2026-07-23 (REJECT; bd-mounted-xattr-workload-gap-fr6iq)
 
 Status: REJECT before source edit. Ledger and recent-log grep first excluded the
