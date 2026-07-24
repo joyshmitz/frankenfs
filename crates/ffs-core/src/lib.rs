@@ -18128,7 +18128,20 @@ impl OpenFs {
         let pctx = self.ext4_persist_ctx_lockfree().ok_or_else(|| {
             FfsError::Format("sharded block alloc: persist ctx unavailable".into())
         })?;
-        sharded.alloc_blocks(cx, dev, &geo, hint, count, &pctx)
+        // Auto-commit the bitmap allocation UNDER THE PER-GROUP LOCK via the
+        // no-txn MVCC adapter — SYMMETRIC with the sharded inode alloc, which
+        // already uses `block_device_adapter` (auto-commit) and does not race.
+        // Staging the bitmap write into the caller's batched dir-add txn (`dev`)
+        // instead left the pick invisible to a concurrent same-group create's find
+        // (which reads committed state via `dev.read_block`), so both threads
+        // picked the same free block → a double-alloc the OR-merge correctly
+        // fail-closes on (bd-bhh0i BUG-4 find-race). Committing the pick under the
+        // group lock makes it visible to the next find. The caller's `dev` still
+        // carries the dir content + extent-tree node writes in its batch; only the
+        // bitmap bit + group free-count commit eagerly (like the inode bit).
+        let _ = dev;
+        let alloc_dev = self.block_device_adapter();
+        sharded.alloc_blocks(cx, &alloc_dev, &geo, hint, count, &pctx)
     }
 
     /// Sharded (no-write-lock) block FREE for the bd-bhh0i parallel-create cutover

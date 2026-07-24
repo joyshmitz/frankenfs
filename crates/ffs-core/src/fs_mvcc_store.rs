@@ -185,14 +185,19 @@ impl FsMvccStore {
     {
         let mut txn = self.begin();
         let snapshot = txn.snapshot();
-        // When the store holds no version at the snapshot, the block is read
-        // from the base device and that content is the merge's common ancestor:
-        // record it so a concurrent writer to a disjoint range of the SAME
-        // freshly-allocated block can merge instead of FCW-conflicting (the
-        // version chain yields an empty base otherwise). A resident version
-        // needs no recorded base — `version_bytes_at` recovers it (bd-bhh0i).
+        // The merge common ancestor is this block's content at the txn's snapshot:
+        // the resident version if one exists, else the base-device bytes. Record it
+        // as `staged_base` ALWAYS — do NOT rely on the version chain still holding
+        // it at commit time. A concurrent committer's `prune_after_commit_if_due`
+        // can drop the version at this (unregistered auto-commit) snapshot between
+        // stage and commit, after which the sharded merge's `version_bytes_at`
+        // yields an EMPTY base → a spurious length-mismatch abort of a disjoint
+        // range-overlay (e.g. two creates writing different inode slots of the same
+        // inode-table block). Recording the base makes the merge independent of
+        // pruning (bd-bhh0i BUG-4 inode-table pruning race). The extra block-sized
+        // clone is only consumed on a same-block conflict.
         let (mut data, base) = match self.read_visible(block, snapshot) {
-            Some(bytes) => (bytes, None),
+            Some(bytes) => (bytes.clone(), Some(bytes)),
             None => {
                 let device_base = read_base()?;
                 (device_base.clone(), Some(device_base))
