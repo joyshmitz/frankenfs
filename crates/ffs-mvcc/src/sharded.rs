@@ -700,12 +700,20 @@ impl ShardedMvccStore {
         }
 
         let proof = txn.merge_proof(block).cloned().unwrap_or_default();
+        // A freshly-allocated block (two concurrent creates writing disjoint inode
+        // slots / group descriptors) has NO version at the shared snapshot, so the
+        // version chain yields an empty base and the range-overlay merge would
+        // spuriously reject on a length mismatch. Fall back to the base bytes the
+        // committing txn recorded during its RMW — the on-disk content both writers
+        // patched from, i.e. the true common ancestor (bd-bhh0i; the single-store
+        // path fixed the same way at `MvccStore::resolved_write_*`).
         let base = shard
             .versions
             .get(&block)
             .and_then(|versions| {
                 resolve_version_bytes_cow_at_or_before(versions, txn.snapshot().high)
             })
+            .or_else(|| txn.staged_base(block).map(std::borrow::Cow::Borrowed))
             .unwrap_or_default();
         let latest = shard
             .versions
@@ -824,6 +832,7 @@ impl ShardedMvccStore {
         snapshot: Snapshot,
         bytes: Vec<u8>,
         merge_proof: Option<&MergeProof>,
+        staged_base: Option<&[u8]>,
     ) -> Vec<u8> {
         let observed = Self::latest_commit_seq_in_shard(shard, block);
         if observed <= snapshot.high {
@@ -831,10 +840,17 @@ impl ShardedMvccStore {
         }
 
         let proof = merge_proof.cloned().unwrap_or_default();
+        // Same freshly-allocated-block base fallback as the preflight
+        // (`check_write_mergeable_locked`): install must rebuild the merged block
+        // from the SAME common ancestor the preflight validated against, or a
+        // disjoint-slot merge that the gate accepted would install unmerged bytes
+        // (clobbering the concurrent writer's slot) via the `merge_bytes` None
+        // fallback below (bd-bhh0i).
         let base = shard
             .versions
             .get(&block)
             .and_then(|versions| resolve_version_bytes_cow_at_or_before(versions, snapshot.high))
+            .or_else(|| staged_base.map(std::borrow::Cow::Borrowed))
             .unwrap_or_default();
         let latest = shard
             .versions
@@ -854,10 +870,17 @@ impl ShardedMvccStore {
         block: BlockNumber,
         bytes: Vec<u8>,
         merge_proof: Option<&MergeProof>,
+        staged_base: Option<&[u8]>,
         ctx: CommitInstallContext,
     ) {
-        let version_bytes =
-            Self::merged_write_bytes_locked(shard, block, ctx.snapshot, bytes, merge_proof);
+        let version_bytes = Self::merged_write_bytes_locked(
+            shard,
+            block,
+            ctx.snapshot,
+            bytes,
+            merge_proof,
+            staged_base,
+        );
         let version_data = Self::build_version_data(
             shard.versions.get(&block),
             version_bytes,
@@ -1264,6 +1287,7 @@ impl ShardedMvccStore {
                 block,
                 staged.bytes,
                 Some(&staged.merge_proof),
+                staged.base.as_deref(),
                 install_ctx,
             );
         }
@@ -1345,6 +1369,7 @@ impl ShardedMvccStore {
                 block,
                 staged.bytes,
                 Some(&staged.merge_proof),
+                staged.base.as_deref(),
                 install_ctx,
             );
         }
