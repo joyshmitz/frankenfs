@@ -13,6 +13,45 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## bd-bhh0i cutover residual @30k REFINED — read-your-writes-vs-prune TOCTOU (partial fix) + a suspected sub-threshold write clobber (bd-kdmu4) - 2026-07-24 (turn 9, investigation)
+
+Status: no net commit (exploration reverted; main stays at the turn-8 8k-validated
+state, 73d7fa52). Investigated the turn-8 residual (`NotFound("inode N")` at
+count~30000, groups near-full). Two findings, neither fully fixed → deferred.
+
+(A) Write-clobber NOT confirmed but NOT ruled out: instrumented
+`install_committed_version_locked` to flag any block-585..1096 (group-1 inode
+table) version installed with `new_nz + 256 < prev_nz` non-zero bytes — fired 0×
+on a failing run. BUT the `+256` threshold is too coarse: one inode slot holds
+only ~100-150 non-zero bytes, so a SINGLE-slot clobber slips under it. Re-run with
+threshold ~32 before concluding.
+
+(B) Read-your-writes-vs-prune TOCTOU (diagnosed, partial fix measured): the
+bd-bhh0i writable adapters are UNREGISTERED (a perf opt), so `ShardedMvccStore::
+prune_safe`'s watermark = `current_snapshot().high` (the chain head) whenever
+`active_snapshots` is empty. `prune_versions_older_than` then collapses a hot
+inode-table block to its single newest version. A read-your-writes read
+(`FsMvccBlockDevice::read_snapshot` = `current_snapshot()`) that captured seq S,
+then races a concurrent commit+prune to S+1, calls `read_visible(block, S)` →
+None (S's version dropped) → falls back to the STALE on-device block (the
+create-bench never flushes mid-run, so the device inode table is mkfs-empty) →
+`NotFound`. PARTIAL FIX TESTED: `read_snapshot` for read-your-writes returning
+`Snapshot { high: CommitSeq(u64::MAX) }` (resolve the newest RETAINED version =
+exactly read-your-writes semantics; byte-identical for the serialized single-lock
+path) improved 4t/30000 to 4/6 pass but did NOT eliminate the failure → confirms a
+SECOND residual (likely the (A) sub-threshold write clobber). Reverted (broad core
+read-semantics change, not landed without the write-clobber fix + default-path
+validation).
+
+NEXT (both needed for the full 3.7x): (1) land the read-your-writes MAX-read fix
+(after ffs-core writable default-path tests confirm byte-identity); (2) re-run
+INSTALL-SHRINK at threshold ~32 to locate + fix the single-slot write clobber
+(likely the merge-install rebuild vs a concurrently-advanced `latest`, or the
+`observed <= snapshot` no-conflict path installing a base that lost a slot);
+(3) then measure release-perf 8t≥4×1t on a ≥2GiB/16-group image. The cutover
+already PASSES + scales positively at 8k (turn 8) — this is the last correctness
+gap before the ≥4× measurement.
+
 ## bd-bhh0i cutover PASSES at 8k — block-bitmap find-race + inode-table pruning race FIXED; positive scaling (bd-bhh0i / bd-kdmu4) - 2026-07-24 (turn 8, ⭐ FIRST PASS)
 
 Status: two fixes LANDED (7653bdec); the sharded parallel-create cutover PASSES
