@@ -13,6 +13,50 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Delete checksum-snapshot split is below the measured frontier - 2026-07-23 (REJECT; bd-opb6l)
+
+Status: REJECT before source edit. Ledger and recent-log grep first excluded the
+closed allocation, directory-checksum, MVCC-copy, concurrent-dispatch, and
+mounted-transport families. The remaining narrow hypothesis was to represent the
+directory-entry removal checksum change as disjoint tiny fields instead of a
+contiguous `DirBlockEdit` preimage snapshot.
+
+Profile first: strict RCH built the immutable `4d309e82` release-perf CLI on
+worker `vmi1227854` (job `j-29944835100114983`; binary SHA-256
+`1f8b41ed0780a7c1f7ee0664c7868cbe67dedecc4679fa26f6c3408ebf1dae91`).
+A fresh pinned `cycles:u` profile then removed 20,000 entries through the serial
+direct-engine `delbench` path in **116.021 ms / 172,382 unlinks/s**. It captured
+**893 samples with zero lost**. The whole
+`ffs_dir::remove_entry_take_inode_tracked` helper accounted for just **1.16%
+self**; the proposed checksum-snapshot representation is only a fraction of
+that helper. Even impossible removal of the entire helper has an Amdahl ceiling
+of `1 / (1 - 0.0116) = 1.0117x`.
+
+The actual frontier remained `__memmove_avx_unaligned_erms` at **15.92% self**
+(principally MVCC visible-version and block-buffer copies) and
+`ShardedMvccStore::commit` at **8.72% self**. Those are architectural ownership
+surfaces, not a permissible measured-frontier checksum edit. Fresh throughput
+was within **0.82%** of the previous 173,790-unlinks/s run, corroborating the
+same profile rather than exposing a new hotspot. The concurrent sharded merge
+change landed after `4d309e82` does not affect this serial attribution.
+
+No source or harness changed, so ordering, tie-breaking, floating point, and RNG
+are N/A. No A/A/B was run: profile-first rejection prevents spending a noisy
+candidate trial on a lever whose impossible upper bound is only **1.012x**. This
+direct-engine attribution is not a fresh direct-kernel comparator; the existing
+mounted delete/kernel measurement remains transport-dominated, and its kernel
+arm missed the mandatory under-5% CV gate. The exercised image passed
+`e2fsck -fn` after all deletes. Profile:
+`/data/tmp/bronzerabbit_opb6l_profile_4d309e82_20260723.data`.
+
+Retry predicate: reopen only when a clean symbolized delete profile attributes
+at least **5% self** to `remove_entry_take_inode_tracked` /
+`DirBlockEdit::delta`, or after a supported transport primitive removes the
+mounted round-trip floor and promotes this helper into the top path. Then use
+one immutable same-worker binary, rotating A/A/B, an effect beyond the A/A null,
+CV below 5% for every arm, exact incremental-versus-full CRC equivalence, and a
+clean offline fsck result.
+
 ## bd-bhh0i cutover — BUG-5 LANDED (sharded merge base); only the block-bitmap FCW (BUG-4) remains (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 3)
 
 Status: PROGRESS — cutover reduced to ONE remaining conflict. Root-caused why
