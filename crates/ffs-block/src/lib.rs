@@ -1037,6 +1037,32 @@ pub trait BlockDevice: Send + Sync {
         self.write_block(cx, block, &data)
     }
 
+    /// Read-modify-write one block under a bit-level OR-merge proof, for a
+    /// monotone (set-only) allocation bitmap block.
+    ///
+    /// Like [`Self::rmw_block`] but the staged write is a whole-block bit OR
+    /// (`MergeProof::BitmapOr`) rather than a range-scoped overlay: two
+    /// concurrent allocators that SET the bits of disjoint blocks in the same
+    /// group bitmap block MERGE (`latest | staged`) even though adjacent free
+    /// blocks share a bitmap byte, which a byte-range hint cannot express. An
+    /// MVCC-backed device reads the base AT ITS TRANSACTION SNAPSHOT and stages
+    /// the OR proof; the default performs a plain read-modify-write and is
+    /// byte-identical for non-MVCC / externally-serialized devices.
+    ///
+    /// `patch` MUST only SET bits (allocation). A bit-clear (free) makes the OR
+    /// proof invalid and falls back to first-committer-wins, so this must never
+    /// be used on the free path.
+    fn rmw_block_bitmap_or(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> Result<()>,
+    ) -> Result<()> {
+        let mut data = self.read_block(cx, block)?.into_inner();
+        patch(&mut data)?;
+        self.write_block(cx, block, &data)
+    }
+
     /// Write a contiguous run of blocks starting at `start`. `data` holds the
     /// concatenated block contents (`data.len()` MUST be a multiple of
     /// `block_size()`); block `start + i` receives `data[i*bs .. (i+1)*bs]`.

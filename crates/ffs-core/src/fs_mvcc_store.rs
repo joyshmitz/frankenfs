@@ -549,6 +549,43 @@ impl<D: BlockDevice> BlockDevice for FsMvccBlockDevice<D> {
         Ok(())
     }
 
+    fn rmw_block_bitmap_or(
+        &self,
+        cx: &Cx,
+        block: BlockNumber,
+        patch: &mut dyn FnMut(&mut Vec<u8>) -> FfsResult<()>,
+    ) -> FfsResult<()> {
+        if self.reads_base_directly() {
+            return Err(FfsError::UnsupportedFeature(
+                "unregistered MVCC block device is read-only".to_owned(),
+            ));
+        }
+        // Same begin-first / read-base-at-snapshot contract as `rmw_block` (a
+        // read taken before `begin` could observe an older version and silently
+        // clobber a concurrent disjoint-bit writer). `patch` is the caller's
+        // set-only bit mutation (allocation); staging `MergeProof::BitmapOr`
+        // lets two concurrent allocators to disjoint blocks of the SAME group
+        // bitmap block merge (`latest | staged`) instead of first-committer-wins
+        // conflicting, even when their bits share a byte (bd-bhh0i BUG 4).
+        let mut txn = self.store.begin();
+        let snapshot = txn.snapshot();
+        let (mut data, base) = match self.store.read_visible_block_buf(block, snapshot) {
+            Some(buf) => (buf.as_slice().to_vec(), None),
+            None => {
+                let device_base = self.base.read_block(cx, block)?.into_inner();
+                (device_base.clone(), Some(device_base))
+            }
+        };
+        patch(&mut data)?;
+        txn.stage_write_with_proof_and_base(block, data, MergeProof::BitmapOr, base);
+        let commit_seq = self
+            .store
+            .commit(txn)
+            .map_err(|error| FfsError::Format(error.to_string()))?;
+        self.store.prune_after_commit_if_due(commit_seq);
+        Ok(())
+    }
+
     fn block_size(&self) -> u32 {
         self.base.block_size()
     }
