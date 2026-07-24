@@ -13,6 +13,48 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## btrfs runtime path swept for a byte-identical per-op lever — SATURATED (bd-kdmu4) - 2026-07-24 (turn 6, REJECT #2)
+
+Status: REJECT (no source change). Cycling levers off the floored read path, swept
+the least-mined subsystem this campaign — the btrfs runtime read/lookup/readdir/
+tree-walk path (crates/ffs-btrfs/src + the `btrfs_*` functions in ffs-core) — for
+the byte-identical compile+test-landable classes (buffer-in-loop hoist,
+materialize-then-scalar, multi-pass fold fusion, O(N)→O(1) memoization, hot-path
+clone elimination). NO clean per-op lever found; the path is saturated with prior
+`bd-*` optimizations:
+
+- `btrfs_read_logical_into` reads straight into the caller's `out` slice (no
+  per-block BlockBuf alloc, no post-read copy). `btrfs_read_file_into` = rayon
+  deferred device reads + `split_at_mut` disjoint zero-copy windows + per-inode RO
+  extent cache + lock-free hot-inode slot + decompressed-extent cache; its only
+  `vec![0; compressed_len]` is INSIDE the rayon job (excluded).
+- `btrfs_read_parsed_node` Arc node cache; its `vec![0; ns]` is MOVED into
+  `parse_btrfs_tree_node_owned` as the node's retained backing (not a discarded
+  loop buffer). `btrfs_lookup_child` O(1) dir-entry cache; `btrfs_readdir_entries`
+  zero-copy `range_with` + FxHash first-occurrence dedup; `btrfs_fs_tree_root_bytenr`
+  memoized O(1); `btrfs_decompress` per-thread zlib/zstd context reuse;
+  `btrfs_verify_one_extent_csum` reused sector buffer (prior win e0aa5a1b).
+- ffs-btrfs `.sum()`/`.fold()` sites (total_free/total_used/largest_free_extent/
+  sync_block_group_accounting) are single-pass, on the write/commit path — not
+  per-read, no fuseable multi-pass. Item parsers (parse_dir_items/extent_data/
+  inode_refs/inode_item/collect_leaf_items) build only their required owned output.
+
+Sub-noise candidate flagged + rejected: `btrfs_lookup_child` (ffs-core ~8604)
+`parse_dir_items` materializes a `Vec<BtrfsDirItem>` (per-name `.to_vec()`) then
+linear-scans for one name — the zero-alloc `visit_dir_items` visitor (ffs-btrfs
+~1914) would early-exit without allocating. REJECTED: a DIR_ITEM bucket keyed at
+one `name_hash` holds ≈1 entry (multiple only on hash collision) → ratio ≈1→1, and
+it is a fallback BEHIND the O(1) `btrfs_dir_entry_cache` + tree-log point-descent →
+below the noise floor. Retry only if a warm-btrfs-lookup profile shows
+`parse_dir_items`/`btrfs_lookup_child` >~5% self-time (i.e. a collision-heavy or
+cache-cold dir workload).
+
+⭐ 2 consecutive fresh REJECTs this session (turn 5 read-path floor, turn 6 btrfs
+saturation) on top of turn 4b's peer-file BLOCKER and the memory's exhaustive
+ext4/alloc/dir/extent/xattr/inode/ondisk sweep. The bd-kdmu4 micro-lever surface
+is exhausted; the sole productive lever remains the bd-bhh0i cutover, blocked on
+the peer-side sharded dir-growth dev-routing (turn 4b) — flagged for coordination.
+
 ## Mounted read-path zero-copy re-probe — FUSE transport floor CONFIRMED with 3 fresh negative findings (bd-kdmu4) - 2026-07-23 (turn 5, REJECT)
 
 Status: REJECT (no source change). After the bd-bhh0i wiring blocker, cycled back
