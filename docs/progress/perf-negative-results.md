@@ -13,6 +13,51 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Clean-fsync parsed-GDT cache invalidation is below the transport floor - 2026-07-23 (REJECT; bd-fsync-journal-latency-gap-ptp4x)
+
+Status: REJECT before source edit. Ledger and recent-log grep first excluded the
+kept clean-device sync epoch and durable watermark, plus the rejected dirty O(G)
+descriptor rewrite, duplicate sync, JBD2 write combining, and group-commit
+architecture. Source attribution found one distinct measured-frontier candidate:
+`ext4_sync_with_logging` calls `clear_ext4_writable_group_desc_cache` after every
+`flush_to_device_after`, including a clean boundary where `flushed == 0`. The
+cache is striped across 64 mutex shards, so the hypothesis was to move this
+invalidation under `flushed > 0`.
+
+Profile first: the immutable `4d309e82` release-perf CLI was built by strict RCH
+on `vmi1227854` (job `j-29944835100114983`; binary SHA-256
+`1f8b41ed0780a7c1f7ee0664c7868cbe67dedecc4679fa26f6c3408ebf1dae91`).
+On a private clean RW image, pinned 30 x 10,000 clean-directory `fsync` batches
+measured **149.565 ms median / 14.957 us per call**, CV **3.091%**. A quiet
+`cycles:u` profile captured **16K samples with zero lost**. FUSE receive/reply
+syscalls dominated; the whole `ext4_sync_with_logging` function accounted for
+only **0.02% self / 0.03% including children**, and neither the cache clear nor a
+lock symbol reached the 0.01% reporting floor. Impossible elimination of the
+entire enclosing function therefore has a ceiling of about **1.0002x**.
+
+The identical pinned syscall loop on a kernel ext4 loop mount of an independent
+clone measured **4,012.185 ms median / 401.219 us per call**, CV **1.551%**.
+FrankenFS is already **26.83x faster / 96.27% lower latency** on this clean
+directory shape because the previously kept device epoch skips a backing-file
+sync when no write completed since the last successful sync. Both images passed
+offline `e2fsck -fn`. This direct-kernel result supersedes the earlier noisy
+routing-only kernel arm for this exact fixture; it does not generalize to dirty
+fsync, which the same-day ledger shows at kernel parity and disk-barrier-bound.
+
+No source or harness changed, so ordering, tie-breaking, floating point, and RNG
+are N/A. No A/A/B was run: the profile gate rejects a candidate whose impossible
+upper bound is below measurement resolution and whose target shape already beats
+kernel ext4. A first default-INFO profile is explicitly invalid and discarded:
+per-fsync tracing formatting dominated it. The accepted quiet profile is
+`/data/tmp/bronzerabbit_fsync_clean_quiet_profile_4d309e82_20260723.data`.
+
+Retry predicate: reopen only if a quiet symbolized clean-fsync profile attributes
+at least **5% self** to `ext4_sync_with_logging` or `ShardedCache::clear`, or
+after a supported FUSE transport primitive removes the request/reply floor and
+promotes invalidation into the top path. Then use one immutable same-worker
+binary, rotating A/A/B plus kernel, an effect beyond the A/A null, CV below 5%
+for every arm, identical fsync results, and clean offline fsck.
+
 ## Delete checksum-snapshot split is below the measured frontier - 2026-07-23 (REJECT; bd-opb6l)
 
 Status: REJECT before source edit. Ledger and recent-log grep first excluded the
