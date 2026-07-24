@@ -13,6 +13,53 @@ met by new profile evidence.
   produce the verdict.
 - Rejected ideas require a concrete retry predicate, not a vague "try later."
 
+## Mounted read-path zero-copy re-probe — FUSE transport floor CONFIRMED with 3 fresh negative findings (bd-kdmu4) - 2026-07-23 (turn 5, REJECT)
+
+Status: REJECT (no source change). After the bd-bhh0i wiring blocker, cycled back
+to the zero-copy read lane and re-investigated it fresh (ledger + code, not just
+prior memory). The mounted read is at its FUSE-transport floor; three doors the
+prior ledger had NOT explicitly closed are now closed:
+
+1. FUSE_PASSTHROUGH is advertised (`init()` adds `FUSE_PASSTHROUGH` +
+   `set_max_stack_depth(1)`) but is ARCHITECTURALLY INAPPLICABLE to FrankenFS.
+   Passthrough serves a FUSE file's read directly from a registered backing fd,
+   but `struct fuse_backing_map` has `{fd, flags, padding}` and NO OFFSET field:
+   fuse-file offset O maps to backing-fd offset O. FrankenFS is image-backed with
+   extent-scattered file data (file byte O lives at some image offset X != O), so
+   there is no single (fd, offset) that serves the file — passthrough cannot be
+   wired for an image-backed extent-mapped fs. The advertised cap is inert for
+   data reads. Not a lever.
+2. `max_readahead` is kernel-capped: vendored fuser `KernelConfig::new` seeds
+   `max_readahead == max_max_readahead == the kernel's init proposal`, and
+   `set_max_readahead` can only LOWER it (`value > max_max_readahead => Err`). So
+   the daemon cannot advertise a larger readahead window than the kernel offers;
+   it is already at that ceiling without a call. `max_read=16 MiB` is already set,
+   and `FUSE_ASYNC_READ` is on by default (vendored `INIT_FLAGS`). No init-flag
+   read lever remains.
+3. `read_file_data` assembly is copy-optimal (code-confirmed): segment tiling
+   (Run / Partial / Zero), coalesced physically-consecutive runs read VECTORED
+   straight into the caller's disjoint `&mut buf` windows (no assembly copy;
+   partial head/tail blocks copy only their sub-range), parallel 128 KiB chunks
+   (bd-yg6tk / bd-cc-pchunk, measured 1.67x warm), and a sequential extent hint
+   (bd-vpypn) so the per-block `resolve_extent_seq` is an O(1) cached
+   partition_point. The sole residual copy is the inherent page-cache -> reply-
+   buffer copy, which splice targeted and was MEASURED perf-neutral (2026-07-23
+   54872426: overlapped by readahead prefetch, not wall-clock-bound). mmap
+   genuinely needs `unsafe` (memmap2 `Mmap::map` is an `unsafe fn`; no safe
+   offset-mappable alternative) -> forbidden. io_uring submission likewise needs
+   `unsafe`.
+
+Conclusion: the mounted zero-copy read sub-lane is at its architectural floor
+(transport RTT + one inherent reply copy that splice cannot beat under prefetch
+overlap). This matches and extends the prior transport-bound ledger. Retry
+predicate (unchanged from splice, still open): a profile showing the read
+DAEMON-CPU-bound with the reply copy ON the critical path (many-client fan-in
+out-running the readahead-prefetch overlap) — needs a dedicated heavy mounted
+experiment; the stashed splice primitive is ready if that workload ever appears.
+The sole productive bd-kdmu4 lever remains the bd-bhh0i parallel-create cutover,
+now blocked on the peer-side sharded dir-growth dev-routing (turn 4b) — flagged
+for coordination.
+
 ## bd-bhh0i BUG-4 wiring landed as substrate; cutover BLOCKED — sharded dir-growth bitmap write uses a NON-MVCC device (bd-bhh0i / bd-kdmu4) - 2026-07-23 (turn 4b)
 
 Status: KEEP substrate + LEDGERED BLOCKER. Wired the OR-merge proof (turn 4 core)
